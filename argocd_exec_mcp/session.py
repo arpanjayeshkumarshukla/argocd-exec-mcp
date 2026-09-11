@@ -88,19 +88,39 @@ def token_for(server):
     raise RuntimeError(f"no argocd auth-token for {server}; run: argocd login {server}")
 
 
-def list_pods(app, server=None):
-    server = server or default_server()
-    _check_allowed(server)
+def _resource_tree(app, server):
     tok = token_for(server)
     url = (f"https://{server}/api/v1/applications/{urllib.parse.quote(app)}"
            f"/resource-tree?appNamespace=argocd")
     req = urllib.request.Request(url, headers={'Authorization': f'Bearer {tok}'})
-    tree = json.load(urllib.request.urlopen(req, timeout=30, context=SSL_CTX))
+    return json.load(urllib.request.urlopen(req, timeout=30, context=SSL_CTX))
+
+
+def list_pods(app, server=None):
+    server = server or default_server()
+    _check_allowed(server)
+    tree = _resource_tree(app, server)
     return [
         {'namespace': n['namespace'], 'name': n['name'],
          'health': n.get('health', {}).get('status', '')}
         for n in tree.get('nodes', []) if n.get('kind') == 'Pod'
     ]
+
+
+def _owning_deployment(tree, pod_name, pod_namespace):
+    """Walk Pod -> ReplicaSet -> Deployment via the resource tree's own
+    parentRefs, rather than assuming which Deployment a pod belongs to."""
+    by_key = {(n['kind'], n.get('namespace'), n['name']): n for n in tree.get('nodes', [])}
+    pod = by_key.get(('Pod', pod_namespace, pod_name))
+    if not pod:
+        return None
+    for ref in pod.get('parentRefs') or []:
+        rs = by_key.get((ref['kind'], ref['namespace'], ref['name']))
+        if rs and rs['kind'] == 'ReplicaSet':
+            for dref in rs.get('parentRefs') or []:
+                if dref['kind'] == 'Deployment':
+                    return dref['name']
+    return None
 
 
 def get_project(app, server=None):
@@ -116,23 +136,46 @@ def get_project(app, server=None):
     return project
 
 
-def get_first_container(app, server=None):
-    """First container of the first Deployment in the app's rendered
-    manifests. A reasonable default for the common single-Deployment app;
-    pass --container explicitly for anything with more than one."""
+def get_container_for_pod(app, pod_name, pod_namespace, server=None, tree=None):
+    """The first container of *this specific pod's owning Deployment* — not
+    just "the first Deployment found anywhere in the app's manifests", which
+    silently returns the wrong container for an app with more than one
+    Deployment. Ownership is read from the resource tree's own parentRefs
+    (Pod -> ReplicaSet -> Deployment), not assumed.
+
+    Deliberately reads containers from the *manifests* (declared spec), not
+    the live pod: a live pod can carry containers injected outside the
+    declared spec (e.g. an `istio-proxy` sidecar) that would otherwise be
+    picked as "first container" ahead of the actual workload container —
+    confirmed live: a pod here has containers
+    `['istio-proxy', 'pm-performance-test-chart']` in that order, while the
+    Deployment's own spec only ever declared the second."""
     server = server or default_server()
     _check_allowed(server)
+    tree = tree if tree is not None else _resource_tree(app, server)
+    deployment_name = _owning_deployment(tree, pod_name, pod_namespace)
+
     tok = token_for(server)
     url = f"https://{server}/api/v1/applications/{urllib.parse.quote(app)}/manifests"
     req = urllib.request.Request(url, headers={'Authorization': f'Bearer {tok}'})
     data = json.load(urllib.request.urlopen(req, timeout=30, context=SSL_CTX))
+    deployments = []
     for raw in data.get('manifests', []):
         doc = json.loads(raw)
         if doc.get('kind') == 'Deployment':
             containers = doc.get('spec', {}).get('template', {}).get('spec', {}).get('containers', [])
             if containers:
-                return containers[0]['name']
-    raise RuntimeError(f"no Deployment with a container found in app {app!r}'s manifests")
+                deployments.append((doc['metadata']['name'], containers[0]['name']))
+    if not deployments:
+        raise RuntimeError(f"no Deployment with a container found in app {app!r}'s manifests")
+    if deployment_name:
+        for name, container in deployments:
+            if name == deployment_name:
+                return container
+    # Couldn't resolve ownership (pod not owned by a ReplicaSet/Deployment,
+    # or the tree didn't have it) — fall back to the old heuristic, but this
+    # path is now the exception, not the default.
+    return deployments[0][1]
 
 
 def resolve(app, server=None, pod=None):
@@ -140,9 +183,16 @@ def resolve(app, server=None, pod=None):
     the gap ArgoCD's own CLI leaves open (its `context` is server-level only,
     unlike kubectl's per-namespace default). Picks the first Healthy pod when
     `pod` isn't given; returns every candidate too, since picking silently
-    among several would be a worse surprise than naming the choice."""
+    among several would be a worse surprise than naming the choice. The
+    container is resolved from *this specific pod's* owning Deployment, not
+    just any Deployment in the app — see get_container_for_pod()."""
     server = server or default_server()
-    pods = list_pods(app, server)
+    tree = _resource_tree(app, server)
+    pods = [
+        {'namespace': n['namespace'], 'name': n['name'],
+         'health': n.get('health', {}).get('status', '')}
+        for n in tree.get('nodes', []) if n.get('kind') == 'Pod'
+    ]
     if not pods:
         raise RuntimeError(f"no pods found for app {app!r}")
     if pod:
@@ -158,7 +208,7 @@ def resolve(app, server=None, pod=None):
         'project': get_project(app, server),
         'namespace': chosen['namespace'],
         'pod': chosen['name'],
-        'container': get_first_container(app, server),
+        'container': get_container_for_pod(app, chosen['name'], chosen['namespace'], server, tree=tree),
         'candidates': [p['name'] for p in pods],
     }
 

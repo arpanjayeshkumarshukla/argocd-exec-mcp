@@ -122,7 +122,22 @@ deployment to one environment on purpose, not a default restriction.
   the raw stdin fd. What a `pty` test can't stand in for: whether it's
   actually pleasant to type into from a real terminal emulator — verify that
   yourself before relying on it day to day.
-- **Pod/container auto-resolution is a heuristic**, not a guarantee: first
-  `Healthy` pod, first container of the app's first Deployment. Apps with
-  more than one Deployment, or where you need a specific pod (not just any
-  healthy replica), should pass `--pod`/`--container` explicitly.
+- **Pod auto-resolution is a heuristic**: first `Healthy` pod. Where you need
+  a specific pod (not just any healthy replica), pass `--pod` explicitly.
+  Container resolution is *not* a heuristic in the same sense — it walks the
+  resource tree's own `Pod -> ReplicaSet -> Deployment` ownership chain to
+  find the Deployment that actually owns the chosen pod, then takes that
+  Deployment's first declared container (deliberately from the *manifests*,
+  not the live pod: a live pod can carry containers injected outside the
+  declared spec, e.g. an `istio-proxy` sidecar, that would otherwise get
+  picked ahead of the real workload container — confirmed live, where a pod's
+  actual container order was `[istio-proxy, <app container>]`). The one gap
+  in the ownership walk: a Deployment that itself declares more than one
+  container takes the first as declared, which may not be the one you want.
+- **Only Deployment-owned pods resolve a container at all.** A pod backed by
+  a StatefulSet or DaemonSet isn't unsupported by a worse guess — it's
+  unsupported, period: the ownership walk only recognizes
+  `Pod -> ReplicaSet -> Deployment`, and container resolution either falls
+  back to *some* Deployment elsewhere in the app (wrong) or raises (if the
+  app has no Deployment at all). Pass `--container` explicitly for anything
+  not backed by a Deployment.
