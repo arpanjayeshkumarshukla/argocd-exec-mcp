@@ -5,9 +5,13 @@ on:
     branches: ["main"]
     paths:
       - ".github/workflows/**"
+      - ".github/dependabot.yml"
+      - ".pre-commit-config.yaml"
   pull_request:
     paths:
       - ".github/workflows/**"
+      - ".github/dependabot.yml"
+      - ".pre-commit-config.yaml"
 
 permissions: {}
 
