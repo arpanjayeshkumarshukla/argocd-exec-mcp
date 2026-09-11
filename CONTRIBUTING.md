@@ -12,11 +12,19 @@ python3 -m venv .venv
 ```
 .venv/bin/ruff check .
 .venv/bin/mypy argocd_exec_mcp
-.venv/bin/pytest -q
+.venv/bin/bandit -r argocd_exec_mcp
+.venv/bin/pytest -q --cov=argocd_exec_mcp --cov-report=term-missing
 ```
 
-All three run in CI (`.github/workflows/ci.yml`) on every push and PR against
-`main`, on Python 3.10 and 3.12.
+All four run in CI (`.github/workflows/ci.yml`) on every push and PR against
+`main`, on Python 3.10 and 3.12. Coverage is reported in CI logs only — no
+external service, no account to set up.
+
+Or install the git hook once (`.venv/bin/pre-commit install`) and let it run
+ruff/mypy/bandit automatically on every commit. The `system`-language hooks
+need this repo's own venv active on `PATH` (they run `mypy`/`bandit`
+directly, not a bundled copy) — activate `.venv` before committing, same as
+you'd need to before running the commands above by hand.
 
 ## Test layers
 

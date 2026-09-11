@@ -65,8 +65,8 @@ def interactive(app, pod, container, namespace, project, server, shell=None):
         cols, rows = shutil.get_terminal_size()
         try:
             ws.send(json.dumps({"operation": "resize", "cols": cols, "rows": rows}))
-        except Exception:
-            pass
+        except (websocket.WebSocketException, OSError):
+            pass  # a resize failing isn't worth tearing down the session over
 
     send_resize()
     try:
@@ -117,8 +117,8 @@ def interactive(app, pod, container, namespace, project, server, shell=None):
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
         try:
             ws.close()
-        except Exception:
-            pass
+        except (websocket.WebSocketException, OSError):
+            pass  # already closing; nothing left to do with a close-time error
 
 
 def main():

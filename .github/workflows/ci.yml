@@ -19,4 +19,5 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: ruff check .
       - run: mypy argocd_exec_mcp
-      - run: pytest -q
+      - run: bandit -r argocd_exec_mcp
+      - run: pytest -q --cov=argocd_exec_mcp --cov-report=term-missing

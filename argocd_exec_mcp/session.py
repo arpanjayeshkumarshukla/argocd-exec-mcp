@@ -51,6 +51,7 @@ import json
 import os
 import re
 import ssl
+import subprocess  # nosec B404 - used only for the reviewed call in _can_i_exec_create
 import time
 import urllib.parse
 import urllib.request
@@ -109,12 +110,24 @@ def token_for(server):
     raise RuntimeError(f"no argocd auth-token for {server}; run: argocd login {server}")
 
 
+def _get_json(url, token, timeout):
+    """GET `url` as JSON, authenticated with a bearer token.
+
+    `url` is always built as f"https://{server}/..." from a value that's
+    already passed through `default_server()`/`_check_allowed()` or an
+    explicit `--server`, never from unsanitized external input — so the
+    scheme is never attacker-influenced, despite bandit's broad B310
+    warning on any `urlopen()` call.
+    """
+    req = urllib.request.Request(url, headers={'Authorization': f'Bearer {token}'})
+    return json.load(urllib.request.urlopen(req, timeout=timeout, context=SSL_CTX))  # nosec B310
+
+
 def _resource_tree(app, server):
     tok = token_for(server)
     url = (f"https://{server}/api/v1/applications/{urllib.parse.quote(app)}"
            f"/resource-tree?appNamespace=argocd")
-    req = urllib.request.Request(url, headers={'Authorization': f'Bearer {tok}'})
-    return json.load(urllib.request.urlopen(req, timeout=30, context=SSL_CTX))
+    return _get_json(url, tok, 30)
 
 
 def list_pods(app, server=None):
@@ -158,12 +171,32 @@ def get_project(app, server=None):
     _check_allowed(server)
     tok = token_for(server)
     url = f"https://{server}/api/v1/applications/{urllib.parse.quote(app)}"
-    req = urllib.request.Request(url, headers={'Authorization': f'Bearer {tok}'})
-    data = json.load(urllib.request.urlopen(req, timeout=15, context=SSL_CTX))
+    data = _get_json(url, tok, 15)
     project = data.get('spec', {}).get('project')
     if not project:
         raise RuntimeError(f"app {app!r} has no spec.project in its ArgoCD Application object")
     return project
+
+
+def _can_i_exec_create(server, project, app):
+    """`argocd account can-i create exec <project>/<app>` already wraps the
+    RBAC-reflection endpoint this needs — reimplementing that one HTTP call
+    ourselves would duplicate a capability the official CLI already
+    provides. Requires the `argocd` binary on PATH, same as `argocd login`
+    already did for this whole project's auth to exist in the first
+    place."""
+    # Deliberately resolved via PATH, not an absolute path (bandit B607): the
+    # whole point is to use whatever `argocd` the user already authenticated
+    # with via `argocd login`, the same way that command itself was found.
+    # No shell=True and every argument is a plain string in a list (bandit
+    # B603/B404): there's no shell metacharacter interpretation for `project`
+    # or `app` to exploit, since execve() never parses this as a shell line.
+    result = subprocess.run(  # nosec B603 B607
+        ['argocd', 'account', 'can-i', 'create', 'exec', f"{project}/{app}",
+         '--server', server],
+        capture_output=True, text=True, timeout=15, check=True,
+    )
+    return result.stdout.strip() == 'yes'
 
 
 def check_prerequisites(app, server=None):
@@ -177,10 +210,9 @@ def check_prerequisites(app, server=None):
     `applications,get` is checked by actually calling get_project() rather
     than a can-i dry-run: a real API call that requires the permission is a
     stronger signal that enforcement will behave the same way at exec time
-    than a permission-reflection endpoint is. `exec,create` uses ArgoCD's
-    own `/api/v1/account/can-i/{resource}/{action}/{subresource}` endpoint
-    instead, since there's no cheaper real call that exercises it without
-    actually opening a terminal websocket.
+    than a permission-reflection endpoint is. `exec,create` shells out to
+    `argocd account can-i`, which already wraps the RBAC-reflection endpoint
+    this needs — see _can_i_exec_create().
     """
     server = server or default_server()
     _check_allowed(server)
@@ -188,8 +220,7 @@ def check_prerequisites(app, server=None):
     results = []
 
     url = f"https://{server}/api/v1/settings"
-    req = urllib.request.Request(url, headers={'Authorization': f'Bearer {tok}'})
-    settings = json.load(urllib.request.urlopen(req, timeout=15, context=SSL_CTX))
+    settings = _get_json(url, tok, 15)
     exec_enabled = bool(settings.get('execEnabled'))
     results.append((exec_enabled, (
         "ArgoCD's terminal feature (execEnabled) is enabled" if exec_enabled else
@@ -204,11 +235,11 @@ def check_prerequisites(app, server=None):
         return results
     results.append((True, f"applications,get on {app!r}: allowed (project={project!r})"))
 
-    subresource = urllib.parse.quote(f"{project}/{app}", safe='')
-    url = f"https://{server}/api/v1/account/can-i/exec/create/{subresource}"
-    req = urllib.request.Request(url, headers={'Authorization': f'Bearer {tok}'})
-    can_i = json.load(urllib.request.urlopen(req, timeout=15, context=SSL_CTX))
-    exec_allowed = can_i.get('value') == 'yes'
+    try:
+        exec_allowed = _can_i_exec_create(server, project, app)
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
+        results.append((False, f"exec,create check FAILED to run — {e}"))
+        return results
     results.append((exec_allowed, (
         f"exec,create on {project}/{app}: allowed" if exec_allowed else
         f"exec,create on {project}/{app}: DENIED — ask your ArgoCD admin to grant "
@@ -246,8 +277,7 @@ def get_container_for_pod(app, pod_name, pod_namespace, server=None, tree=None):
 
     tok = token_for(server)
     url = f"https://{server}/api/v1/applications/{urllib.parse.quote(app)}/manifests"
-    req = urllib.request.Request(url, headers={'Authorization': f'Bearer {tok}'})
-    data = json.load(urllib.request.urlopen(req, timeout=30, context=SSL_CTX))
+    data = _get_json(url, tok, 30)
     workloads = []  # (kind, name, [container names in declared order])
     for raw in data.get('manifests', []):
         doc = json.loads(raw)
@@ -447,6 +477,6 @@ class PodSession:
         if self.ws is not None:
             try:
                 self.ws.close()
-            except Exception:
-                pass
+            except (websocket.WebSocketException, OSError):
+                pass  # already closing; nothing left to do with a close-time error
             self.ws = None
