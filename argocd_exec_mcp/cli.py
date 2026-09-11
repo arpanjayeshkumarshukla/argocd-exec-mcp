@@ -21,25 +21,37 @@ import argparse
 import json
 import os
 import select
+import shlex
 import shutil
 import signal
 import ssl
 import sys
 import termios
+import threading
 import tty
 import urllib.parse
 
 import certifi
 import websocket
 
-from .session import PodSession, allowed_servers, default_server, list_pods, token_for
+from .session import PodSession, allowed_servers, default_server, list_pods, resolve, token_for
 
 
 def interactive(app, pod, container, namespace, project, server, shell=None):
     """Raw passthrough session — a human's keystrokes and the pod's own PTY
     output, untouched. Deliberately not sharing extract_output()/the sentinel
     machinery in PodSession: those exist to recover structure a human doesn't
-    need (the human sees the real prompt, real echo, real ANSI codes)."""
+    need (the human sees the real prompt, real echo, real ANSI codes).
+
+    Uses a dedicated reader thread with its own short recv timeout, not
+    select() on the raw fd + the TLS-wrapped websocket socket together:
+    select() only sees the OS-level socket, but SSL buffers decrypted
+    application data internally, so a socket can hold unread data and still
+    not be reported readable — select() then blocks forever waiting for a
+    read event that already happened below the layer it can see. Confirmed
+    live: the session went unresponsive after a couple of commands with the
+    select()-based version.
+    """
     tok = token_for(server)
     params = {
         'pod': pod, 'container': container, 'appName': app,
@@ -55,10 +67,14 @@ def interactive(app, pod, container, namespace, project, server, shell=None):
         sslopt={"cert_reqs": ssl.CERT_REQUIRED, "ca_certs": certifi.where()},
         origin=f"https://{server}", host=server,
     )
+    ws.settimeout(1)  # recv() wakeup interval for the reader thread, not a completion signal
 
     def send_resize(*_):
         cols, rows = shutil.get_terminal_size()
-        ws.send(json.dumps({"operation": "resize", "cols": cols, "rows": rows}))
+        try:
+            ws.send(json.dumps({"operation": "resize", "cols": cols, "rows": rows}))
+        except Exception:
+            pass
 
     send_resize()
     try:
@@ -66,32 +82,45 @@ def interactive(app, pod, container, namespace, project, server, shell=None):
     except (ValueError, AttributeError):
         pass  # not the main thread, or no SIGWINCH on this platform
 
+    done = threading.Event()
+
+    def reader():
+        while not done.is_set():
+            try:
+                m = ws.recv()
+            except websocket.WebSocketTimeoutException:
+                continue
+            except (websocket.WebSocketConnectionClosedException, OSError):
+                break
+            if not m:
+                break
+            try:
+                d = json.loads(m)
+            except (ValueError, TypeError):
+                continue
+            if d.get("operation") == "stdout":
+                sys.stdout.write(d.get("data", ""))
+                sys.stdout.flush()
+        done.set()
+
+    threading.Thread(target=reader, daemon=True).start()
+
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
     tty.setraw(fd)
     try:
-        while True:
-            r, _, _ = select.select([fd, ws.sock], [], [])
-            if ws.sock in r:
-                try:
-                    m = ws.recv()
-                except (websocket.WebSocketConnectionClosedException, OSError):
-                    break
-                if not m:
-                    break
-                try:
-                    d = json.loads(m)
-                except (ValueError, TypeError):
-                    continue
-                if d.get("operation") == "stdout":
-                    sys.stdout.write(d.get("data", ""))
-                    sys.stdout.flush()
+        while not done.is_set():
+            r, _, _ = select.select([fd], [], [], 0.5)  # plain OS fd only — safe to select() on
             if fd in r:
                 data = os.read(fd, 1024)
                 if not data:
                     break
-                ws.send(json.dumps({"operation": "stdin", "data": data.decode(errors='replace')}))
+                try:
+                    ws.send(json.dumps({"operation": "stdin", "data": data.decode(errors='replace')}))
+                except Exception:
+                    break
     finally:
+        done.set()
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
         try:
             ws.close()
@@ -126,19 +155,46 @@ def main():
             print(pod['namespace'], pod['name'], pod['health'])
         return
 
-    missing = [f for f in ('pod', 'container', 'namespace', 'project')
-               if not getattr(a, f)]
-    if missing:
-        sys.exit(f"missing required: {', '.join(missing)}")
+    pod, container, namespace, project = a.pod, a.container, a.namespace, a.project
+    if not (pod and container and namespace and project):
+        # --app alone is enough: pod/container/namespace/project are all
+        # derivable from it. ArgoCD's own `context` is server-level only —
+        # there's no per-app default the way kubectl has a default namespace —
+        # so this is this tool's own convenience, not something argocd gives us.
+        resolved = resolve(a.app, server, pod=a.pod)
+        filled = []
+        if not pod:
+            pod = resolved['pod']
+            filled.append(f"pod={pod}")
+        if not namespace:
+            namespace = resolved['namespace']
+            filled.append(f"namespace={namespace}")
+        if not container:
+            container = resolved['container']
+            filled.append(f"container={container}")
+        if not project:
+            project = resolved['project']
+            filled.append(f"project={project}")
+        others = [p for p in resolved['candidates'] if p != pod]
+        note = f"[auto-resolved {', '.join(filled)}"
+        if not a.pod and others:
+            note += f" — other pods available: {', '.join(others)} (pass --pod to pick one)"
+        note += "]"
+        print(note, file=sys.stderr)
 
     if a.interactive:
-        return interactive(a.app, a.pod, a.container, a.namespace, a.project, server, a.shell)
+        return interactive(a.app, pod, container, namespace, project, server, a.shell)
 
     if not a.cmd:
         sys.exit("missing required: command (or pass --interactive)")
 
-    session = PodSession(a.app, a.pod, a.container, a.namespace, a.project, server, a.shell)
-    output, exit_code = session.run(' '.join(a.cmd), a.timeout)
+    # shlex.join, not ' '.join: argparse's nargs='*' has already split cmd into
+    # argv elements per the *local* shell's quoting, so a bare join here would
+    # silently drop that quoting before the string reaches the *remote* shell —
+    # e.g. ['node', '-e', 'console.log(x)'] rejoined as
+    # "node -e console.log(x)" hits a remote syntax error on the unquoted '('.
+    session = PodSession(a.app, pod, container, namespace, project, server, a.shell)
+    output, exit_code = session.run(shlex.join(a.cmd), a.timeout)
     session.close()
     print(output)
     if exit_code is None:

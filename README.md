@@ -9,6 +9,14 @@ an AI agent can drive across many separate tool calls without reconnecting
 every time — closer to `kubectl exec -it` staying open than to running
 `kubectl exec` fresh per command.
 
+**Assumes your ArgoCD instance already has web-based terminal access
+enabled** (`exec.enabled: "true"` in `argocd-cm`, i.e. `ExecEnabled` in
+ArgoCD's settings — the same switch that turns on the terminal tab in the
+web UI) and that your token/RBAC role carries the `applications, get` and
+`exec, create` actions for the app you're targeting. This project doesn't
+turn that feature on; it's a second client for a capability your ArgoCD
+admin has to have already granted.
+
 ## Why this exists
 
 ArgoCD's terminal endpoint (`server/application/terminal.go` in
@@ -58,21 +66,40 @@ currently pointed at.
 
 ## Usage
 
+`--app` is the only thing you must supply — `--pod`/`--container`/
+`--namespace`/`--project` are all derivable from it (ArgoCD's own `context`
+concept is server-level only, unlike `kubectl`'s per-namespace default, so
+this tool resolves the rest itself: the REST `applications/{app}` object for
+`project`, `applications/{app}/manifests` for the first Deployment's first
+container, and the resource tree for pod + namespace). When there's more
+than one pod, the first `Healthy` one is picked and the tool tells you what
+else was available and how to pin one with `--pod`:
+
 ```
 # find pods
 argocd-exec --app <app> --list-pods
 
-# one-shot
-argocd-exec --app <app> --pod <pod> --container <c> \
-            --namespace <ns> --project <proj> -- <command...>
+# one-shot — app alone is enough
+argocd-exec --app <app> -- <command...>
+
+# same, pinned to a specific pod
+argocd-exec --app <app> --pod <pod> -- <command...>
 
 # interactive (real terminal)
-argocd-exec --app <app> --pod <pod> --container <c> \
-            --namespace <ns> --project <proj> --interactive
+argocd-exec --app <app> --interactive
 ```
 
+The remote command's argv is reconstructed with proper shell quoting
+(`shlex.join`), so ordinary invocations don't need any extra quoting layer:
+`argocd-exec --app <app> -- node -e "console.log(1)"` works as your local
+shell already tokenizes it. A compound command (`&&`, `;`, pipes) has to be
+one pre-quoted argument instead, since your *local* shell — not this tool —
+is what splits unquoted `&&`/`;` before this program ever sees them:
+`argocd-exec --app <app> -- 'echo one && echo two'`.
+
 For the MCP server, point your MCP client config at
-`argocd-exec-mcp-server` (stdio transport).
+`argocd-exec-mcp-server` (stdio transport). Its `open_session` tool takes
+the same `app`-alone shortcut and returns what it resolved.
 
 ## Restricting which servers this will touch
 
@@ -82,15 +109,20 @@ deployment to one environment on purpose, not a default restriction.
 
 ## Known limitations
 
-- **Argument quoting**: the CLI joins `cmd` argv with spaces
-  (`' '.join(...)`) before sending it to the remote shell, so a locally
-  pre-quoted compound command survives (`argocd-exec ... -- 'sh -c "..."'`)
-  but shell metacharacters split across separate argv elements by your local
-  shell (e.g. unquoted parentheses) won't reconstruct correctly remotely.
-  Pre-quote the whole remote command as one argument.
-- **`--interactive` needs a real TTY** (`tty.setraw` on `sys.stdin`) and
-  hasn't been exercised through an automated test for that reason — verify
-  it in your own terminal before relying on it.
-- Requires the ArgoCD server's terminal feature to be enabled
-  (`ExecEnabled` in ArgoCD's settings) and your token to carry the
-  `applications, get` and `exec, create` RBAC actions for the target app.
+- **Compound shell syntax needs one pre-quoted argument.** `&&`/`;`/pipes
+  between unquoted argv elements are split by your *local* shell before this
+  program runs, not by `argocd-exec` — see the quoting note above.
+- **`--interactive` needs a real TTY** (`tty.setraw` on `sys.stdin`). It's
+  been exercised programmatically against a real pod via a `pty`-driven test
+  (multiple sequential commands, a `SIGWINCH`, and a clean remote `exit`),
+  which caught and fixed a real hang — `select()` on the TLS-wrapped
+  websocket socket doesn't reliably report readability once SSL starts
+  buffering decrypted data internally, so the reader now runs on its own
+  thread with a short recv timeout instead of sharing a `select()` call with
+  the raw stdin fd. What a `pty` test can't stand in for: whether it's
+  actually pleasant to type into from a real terminal emulator — verify that
+  yourself before relying on it day to day.
+- **Pod/container auto-resolution is a heuristic**, not a guarantee: first
+  `Healthy` pod, first container of the app's first Deployment. Apps with
+  more than one Deployment, or where you need a specific pod (not just any
+  healthy replica), should pass `--pod`/`--container` explicitly.

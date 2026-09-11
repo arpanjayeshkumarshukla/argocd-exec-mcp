@@ -103,6 +103,66 @@ def list_pods(app, server=None):
     ]
 
 
+def get_project(app, server=None):
+    server = server or default_server()
+    _check_allowed(server)
+    tok = token_for(server)
+    url = f"https://{server}/api/v1/applications/{urllib.parse.quote(app)}"
+    req = urllib.request.Request(url, headers={'Authorization': f'Bearer {tok}'})
+    data = json.load(urllib.request.urlopen(req, timeout=15, context=SSL_CTX))
+    project = data.get('spec', {}).get('project')
+    if not project:
+        raise RuntimeError(f"app {app!r} has no spec.project in its ArgoCD Application object")
+    return project
+
+
+def get_first_container(app, server=None):
+    """First container of the first Deployment in the app's rendered
+    manifests. A reasonable default for the common single-Deployment app;
+    pass --container explicitly for anything with more than one."""
+    server = server or default_server()
+    _check_allowed(server)
+    tok = token_for(server)
+    url = f"https://{server}/api/v1/applications/{urllib.parse.quote(app)}/manifests"
+    req = urllib.request.Request(url, headers={'Authorization': f'Bearer {tok}'})
+    data = json.load(urllib.request.urlopen(req, timeout=30, context=SSL_CTX))
+    for raw in data.get('manifests', []):
+        doc = json.loads(raw)
+        if doc.get('kind') == 'Deployment':
+            containers = doc.get('spec', {}).get('template', {}).get('spec', {}).get('containers', [])
+            if containers:
+                return containers[0]['name']
+    raise RuntimeError(f"no Deployment with a container found in app {app!r}'s manifests")
+
+
+def resolve(app, server=None, pod=None):
+    """Fill in project/namespace/pod/container from just an app name — closes
+    the gap ArgoCD's own CLI leaves open (its `context` is server-level only,
+    unlike kubectl's per-namespace default). Picks the first Healthy pod when
+    `pod` isn't given; returns every candidate too, since picking silently
+    among several would be a worse surprise than naming the choice."""
+    server = server or default_server()
+    pods = list_pods(app, server)
+    if not pods:
+        raise RuntimeError(f"no pods found for app {app!r}")
+    if pod:
+        matches = [p for p in pods if p['name'] == pod]
+        if not matches:
+            raise RuntimeError(
+                f"pod {pod!r} not found in app {app!r}'s pods: {[p['name'] for p in pods]}")
+        chosen = matches[0]
+    else:
+        healthy = [p for p in pods if p['health'] == 'Healthy'] or pods
+        chosen = healthy[0]
+    return {
+        'project': get_project(app, server),
+        'namespace': chosen['namespace'],
+        'pod': chosen['name'],
+        'container': get_first_container(app, server),
+        'candidates': [p['name'] for p in pods],
+    }
+
+
 def extract_output(raw, marker):
     """Isolate a command's own output from the TTY's echo and sentinel noise.
 

@@ -14,7 +14,7 @@ import uuid
 
 from mcp.server.mcpserver import MCPServer
 
-from .session import PodSession, list_pods as _list_pods
+from .session import PodSession, list_pods as _list_pods, resolve as _resolve
 
 mcp = MCPServer("argocd-exec-mcp")
 _sessions: dict[str, PodSession] = {}
@@ -27,17 +27,35 @@ def list_pods(app: str, server: str | None = None) -> list[dict]:
 
 
 @mcp.tool()
-def open_session(app: str, pod: str, container: str, namespace: str, project: str,
-                  server: str | None = None, shell: str | None = None) -> str:
-    """Open a persistent shell session in a pod. Returns a session_id to pass
-    to run()/close_session(). The underlying shell and websocket stay open
-    across multiple run() calls — commands share state (cwd, exported env
-    vars) the way they would in one real terminal."""
+def open_session(app: str, pod: str | None = None, container: str | None = None,
+                  namespace: str | None = None, project: str | None = None,
+                  server: str | None = None, shell: str | None = None) -> dict:
+    """Open a persistent shell session in a pod. `app` alone is enough —
+    pod/container/namespace/project are auto-resolved (first Healthy pod,
+    first container of the app's first Deployment) when omitted; the
+    response says exactly what was picked and what else was available, so
+    don't skip reading it before assuming which pod you're talking to.
+    Returns {session_id, pod, container, namespace, project, other_pods} —
+    pass session_id to run()/close_session(). The underlying shell and
+    websocket stay open across multiple run() calls — commands share state
+    (cwd, exported env vars) the way they would in one real terminal."""
+    if not (pod and container and namespace and project):
+        resolved = _resolve(app, server, pod=pod)
+        pod = pod or resolved['pod']
+        container = container or resolved['container']
+        namespace = namespace or resolved['namespace']
+        project = project or resolved['project']
+        other_pods = [p for p in resolved['candidates'] if p != pod]
+    else:
+        other_pods = []
     session = PodSession(app, pod, container, namespace, project, server, shell)
     session.connect()
     session_id = uuid.uuid4().hex[:12]
     _sessions[session_id] = session
-    return session_id
+    return {
+        "session_id": session_id, "pod": pod, "container": container,
+        "namespace": namespace, "project": project, "other_pods": other_pods,
+    }
 
 
 @mcp.tool()
