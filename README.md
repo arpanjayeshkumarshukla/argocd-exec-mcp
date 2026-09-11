@@ -195,10 +195,14 @@ one place so they can't drift from what the code actually does.
 Unset means "whatever `argocd login` already trusts." This is for pinning a
 deployment to one environment on purpose, not a default restriction.
 
-## Known limitations
+## What's not here yet, and why
 
-Genuinely inherent (not fixable by any design choice here — see the usage
-note above for the shell-quoting case):
+Not a backlog of forgotten work — a record of what was deliberately
+deferred, and the condition under which each item would become worth
+doing, checked directly rather than guessed at where that was possible.
+
+**Genuinely inherent — not fixable by any design choice here** (see the
+usage note above for the shell-quoting case):
 
 - **`--interactive` needs a real TTY** (`tty.setraw` on `sys.stdin`) —
   that's what "raw interactive terminal" means, not a gap. It's been
@@ -213,7 +217,7 @@ note above for the shell-quoting case):
   "more correct" to pick than another. Pass `--pod` when you need a
   specific one, not just any healthy replica.
 
-Actually fixable, and fixed:
+**Actually fixable, and fixed:**
 
 - Container resolution now covers **Deployment, StatefulSet, and
   DaemonSet** (previously Deployment-only) by walking the resource tree's
@@ -232,7 +236,7 @@ Actually fixable, and fixed:
   anything not Deployment/StatefulSet/DaemonSet) still can't resolve a
   container automatically — pass `--container` explicitly for those.
 
-Not root-cause-confirmed, mitigated anyway:
+**Not root-cause-confirmed, mitigated anyway:**
 
 - **The echo-boundary detection rarely failed right after a pod restart** —
   observed once live, immediately after an unrelated deployment rollout,
@@ -245,12 +249,6 @@ Not root-cause-confirmed, mitigated anyway:
   controls (see CHANGELOG), rather than by searching for the echo of a
   potentially long command line. Root cause unconfirmed, since the original
   failure couldn't be reproduced on demand to verify against directly.
-
-## What's not here yet, and why
-
-Not a backlog of forgotten work — a record of what was deliberately
-deferred, and the condition under which each item would become worth
-doing, checked directly rather than guessed at where that was possible.
 
 **Blocked on this repo being public, not on effort:**
 
