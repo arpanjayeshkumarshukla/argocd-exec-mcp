@@ -9,13 +9,34 @@ an AI agent can drive across many separate tool calls without reconnecting
 every time — closer to `kubectl exec -it` staying open than to running
 `kubectl exec` fresh per command.
 
-**Assumes your ArgoCD instance already has web-based terminal access
-enabled** (`exec.enabled: "true"` in `argocd-cm`, i.e. `ExecEnabled` in
-ArgoCD's settings — the same switch that turns on the terminal tab in the
-web UI) and that your token/RBAC role carries the `applications, get` and
-`exec, create` actions for the app you're targeting. This project doesn't
-turn that feature on; it's a second client for a capability your ArgoCD
-admin has to have already granted.
+**Prerequisite, not a limitation: your ArgoCD instance needs web-based
+terminal access already enabled** (`exec.enabled: "true"` in `argocd-cm`,
+the same switch that turns on the terminal tab in the web UI), and your
+token needs the `applications, get` and `exec, create` RBAC actions for
+the target app. This project doesn't turn that feature on or grant that
+role; it's a second client for a capability your ArgoCD admin has to have
+already set up.
+
+Check both automatically instead of finding out opaquely partway through a
+real exec attempt:
+
+```
+argocd-exec --app <app> --check
+```
+
+```
+OK   ArgoCD's terminal feature (execEnabled) is enabled
+OK   applications,get on 'my-app': allowed (project='my-project')
+OK   exec,create on my-project/my-app: allowed
+```
+
+Exits non-zero if anything fails, so it's scriptable
+(`argocd-exec --app <app> --check || echo "not ready"`). Each line is a
+real check, not a guess: `execEnabled` reads ArgoCD's own
+`/api/v1/settings`; `applications,get` is proven by actually calling the
+API that needs it, not a permission dry-run; `exec,create` uses ArgoCD's
+own `/api/v1/account/can-i/...` RBAC-reflection endpoint, since there's no
+cheaper real call that exercises it short of opening a terminal websocket.
 
 ## Why this exists
 

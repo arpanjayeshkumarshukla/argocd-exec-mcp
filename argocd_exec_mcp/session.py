@@ -166,6 +166,57 @@ def get_project(app, server=None):
     return project
 
 
+def check_prerequisites(app, server=None):
+    """Diagnose the two things this project doesn't grant itself and can
+    only fail against opaquely otherwise: ArgoCD's terminal feature
+    (`execEnabled`) and this token's RBAC for the target app. Returns a
+    list of (ok: bool, message: str) in check order, stopping early once a
+    check that a later one depends on has failed — no point calling
+    can-i(exec,create) with a project name you couldn't actually resolve.
+
+    `applications,get` is checked by actually calling get_project() rather
+    than a can-i dry-run: a real API call that requires the permission is a
+    stronger signal that enforcement will behave the same way at exec time
+    than a permission-reflection endpoint is. `exec,create` uses ArgoCD's
+    own `/api/v1/account/can-i/{resource}/{action}/{subresource}` endpoint
+    instead, since there's no cheaper real call that exercises it without
+    actually opening a terminal websocket.
+    """
+    server = server or default_server()
+    _check_allowed(server)
+    tok = token_for(server)
+    results = []
+
+    url = f"https://{server}/api/v1/settings"
+    req = urllib.request.Request(url, headers={'Authorization': f'Bearer {tok}'})
+    settings = json.load(urllib.request.urlopen(req, timeout=15, context=SSL_CTX))
+    exec_enabled = bool(settings.get('execEnabled'))
+    results.append((exec_enabled, (
+        "ArgoCD's terminal feature (execEnabled) is enabled" if exec_enabled else
+        "ArgoCD's terminal feature (execEnabled) is DISABLED — ask your ArgoCD "
+        "admin to set exec.enabled: \"true\" in argocd-cm"
+    )))
+
+    try:
+        project = get_project(app, server)
+    except Exception as e:
+        results.append((False, f"applications,get on {app!r}: FAILED — {e}"))
+        return results
+    results.append((True, f"applications,get on {app!r}: allowed (project={project!r})"))
+
+    subresource = urllib.parse.quote(f"{project}/{app}", safe='')
+    url = f"https://{server}/api/v1/account/can-i/exec/create/{subresource}"
+    req = urllib.request.Request(url, headers={'Authorization': f'Bearer {tok}'})
+    can_i = json.load(urllib.request.urlopen(req, timeout=15, context=SSL_CTX))
+    exec_allowed = can_i.get('value') == 'yes'
+    results.append((exec_allowed, (
+        f"exec,create on {project}/{app}: allowed" if exec_allowed else
+        f"exec,create on {project}/{app}: DENIED — ask your ArgoCD admin to grant "
+        f"the exec,create RBAC action for this app/project"
+    )))
+    return results
+
+
 def get_container_for_pod(app, pod_name, pod_namespace, server=None, tree=None):
     """The container of *this specific pod's owning workload* (Deployment,
     StatefulSet, or DaemonSet) — not just "the first Deployment found

@@ -18,7 +18,15 @@ import urllib.parse
 import certifi
 import websocket
 
-from .session import PodSession, allowed_servers, default_server, list_pods, resolve, token_for
+from .session import (
+    PodSession,
+    allowed_servers,
+    check_prerequisites,
+    default_server,
+    list_pods,
+    resolve,
+    token_for,
+)
 
 
 def interactive(app, pod, container, namespace, project, server, shell=None):
@@ -154,16 +162,26 @@ def main():
                     help="seconds to wait for a one-shot command to complete (default: 20)")
     p.add_argument('--list-pods', action='store_true',
                     help="list this app's pods (namespace, name, health) and exit")
+    p.add_argument('--check', action='store_true',
+                    help="verify prerequisites (ExecEnabled, RBAC) for --app and exit; "
+                         "exits non-zero on any failed check")
     p.add_argument('--interactive', action='store_true',
                     help="open a real interactive shell (raw terminal), like `kubectl exec -it`")
     p.add_argument('cmd', nargs='*',
-                    help="the remote command to run (omit with --list-pods or --interactive)")
+                    help="the remote command to run (omit with --list-pods, --check, "
+                         "or --interactive)")
     a = p.parse_args()
 
     server = a.server or default_server()
     allow = allowed_servers()
     if allow and server not in allow:
         sys.exit(f"refusing: {server} not in ARGOCD_EXEC_ALLOW_SERVERS ({', '.join(allow)})")
+
+    if a.check:
+        results = check_prerequisites(a.app, server)
+        for ok, message in results:
+            print(("OK  " if ok else "FAIL") + " " + message)
+        sys.exit(0 if all(ok for ok, _ in results) else 1)
 
     if a.list_pods:
         for pod in list_pods(a.app, server):
