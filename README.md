@@ -1,28 +1,53 @@
 # argocd-exec-mcp
 
-Run commands in a Kubernetes pod through ArgoCD's own terminal API — no
-`kubectl`, no direct cluster network access, no cluster credentials on your
-machine. ArgoCD already holds those; this talks to the same `/terminal`
-WebSocket endpoint its web UI's terminal tab uses, from the CLI, and (the
-main point of this project) as a **persistent multi-command session** that
-an AI agent can drive across many separate tool calls without reconnecting
-every time — closer to `kubectl exec -it` staying open than to running
-`kubectl exec` fresh per command.
+Run commands in a Kubernetes pod directly through ArgoCD's terminal API. No `kubectl`, no direct cluster network access, and no cluster credentials required on your local machine.
 
-**Prerequisite, not a limitation: your ArgoCD instance needs web-based
-terminal access already enabled** (`exec.enabled: "true"` in `argocd-cm`,
-the same switch that turns on the terminal tab in the web UI), and your
-token needs the `applications, get` and `exec, create` RBAC actions for
-the target app. This project doesn't turn that feature on or grant that
-role; it's a second client for a capability your ArgoCD admin has to have
-already set up.
+If your ArgoCD instance allows web-based terminal access, this tool lets you do the same from your CLI. More importantly, it provides a **Model Context Protocol (MCP) server** that enables AI agents to maintain persistent, multi-command sessions. Instead of opening a fresh connection for every command, agents can preserve shell state (like directories and environment variables) across multiple tool calls.
 
-Check both automatically instead of finding out opaquely partway through a
-real exec attempt:
+---
 
+## Prerequisites
+
+Your ArgoCD administrator must have already enabled web-based terminal access. This tool does not bypass ArgoCD's security; it acts as a client for existing permissions.
+
+* **ArgoCD Config:** `exec.enabled: "true"` must be set in `argocd-cm`.
+* **RBAC Permissions:** Your user token needs the `applications, get` and `exec, create` actions for the target app.
+* **Local Setup:** Python 3.10+ and an active, authenticated `argocd` CLI session.
+
+---
+
+## Installation
+
+This tool reads its authentication token directly from `~/.config/argocd/config`, just like the standard `argocd` CLI. Make sure you have logged in via `argocd login <your-argocd-server>` before proceeding.
+
+To install the CLI and MCP server globally, `pipx` is the recommended method:
+
+```bash
+git clone https://github.com/arpanjayeshkumarshukla/argocd-exec-mcp.git
+cd argocd-exec-mcp
+pipx install .
 ```
+
+Alternatively, you can install it into a standard Python virtual environment:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -e .
+```
+
+Only doing local development (running the test suite, linting)? See `CONTRIBUTING.md` for the `.[dev]` extra instead.
+
+---
+
+## Pre-Flight Check
+
+Once installed, you should verify your setup against a target application before trying to run actual commands. The tool can check your ArgoCD server settings and your RBAC permissions automatically:
+
+```bash
 argocd-exec --app <app> --check
 ```
+
+If successful, you will see output confirming that the terminal feature is enabled and your permissions are correctly configured:
 
 ```
 OK   ArgoCD's terminal feature (execEnabled) is enabled
@@ -30,221 +55,59 @@ OK   applications,get on 'my-app': allowed (project='my-project')
 OK   exec,create on my-project/my-app: allowed
 ```
 
-Exits non-zero if anything fails, so it's scriptable
-(`argocd-exec --app <app> --check || echo "not ready"`). Each line is a
-real check, not a guess: `execEnabled` reads ArgoCD's own
-`/api/v1/settings`; `applications,get` is proven by actually calling the
-API that needs it, not a permission dry-run; `exec,create` uses ArgoCD's
-own `/api/v1/account/can-i/...` RBAC-reflection endpoint, since there's no
-cheaper real call that exercises it short of opening a terminal websocket.
+---
 
-## Why this exists
+## CLI Usage
 
-ArgoCD's terminal endpoint (`server/application/terminal.go` in
-[argoproj/argo-cd](https://github.com/argoproj/argo-cd)) always execs a
-**TTY** shell — `PodExecOptions{TTY: true}` — never a one-shot non-TTY
-command, and there's no CLI wrapper around it (`argocd app --help` has no
-`exec` subcommand). Two consequences follow directly from that, not from
-anything this project chose:
+The `--app` flag is the only required argument. The tool automatically talks to ArgoCD to resolve the project, namespace, pod, and container. If there are multiple pods, it will automatically select the first `Healthy` one and notify you of the others.
 
-- **stdout and stderr are genuinely merged** at the container-runtime level,
-  before ArgoCD ever sees them — same as what a human gets from
-  `kubectl exec -it`.
-- **There's no in-band exit status for an individual command.** The k8s exec
-  protocol reports an exit status for the *shell process*, when it
-  terminates — not for each line you type into it. A raw terminal doesn't
-  need one; a program driving it does.
+* **List available pods:**
+  `argocd-exec --app <app> --list-pods`
+* **Run a single one-shot command:**
+  `argocd-exec --app <app> -- <command...>`
+* **Run a command on a specific pod:**
+  `argocd-exec --app <app> --pod <pod> -- <command...>`
+* **Open a real interactive shell:**
+  `argocd-exec --app <app> --interactive`
 
-So `PodSession.run()` appends a nonced sentinel to every command
-(`; printf '\n__DONE_<nonce>_%s__\n' "$?"`) and waits for its *expanded*
-form (digits, not the literal `%s` the terminal echoes back before running
-anything) — that's the only way to recover a per-command exit code and a
-clean output boundary from a TTY-backed shell, ArgoCD or otherwise.
+> **Note on compound commands:** If you are chaining commands together with `&&`, `;`, or pipes `|`, you must quote the entire command string (e.g., `argocd-exec --app <app> -- 'echo one && echo two'`). Otherwise, your local shell will evaluate the operators before passing the command to ArgoCD.
 
-## What's here
+---
 
-- **`argocd_exec_mcp.session.PodSession`** — the shared client: opens the
-  websocket once, and `run()` can be called repeatedly, with shell state
-  (cwd, exported env vars) persisting across calls, same as a real terminal.
-- **`argocd-exec` CLI** — one-shot (`argocd-exec --app ... -- <cmd>`) or a
-  real interactive shell (`--interactive`, raw terminal passthrough, closer
-  to `kubectl exec -it`).
-- **`argocd-exec-mcp-server`** — an MCP server wrapping `PodSession` as
-  `open_session` / `run` / `close_session` / `list_open_sessions` tools, so
-  an agent can hold one session open across many tool calls instead of
-  paying a full connect+auth+handshake per command.
+## Using with AI Agents (MCP)
 
-## Install
+The `argocd-exec-mcp-server` exposes ArgoCD terminal access to AI agents via four standard tools: `open_session`, `run`, `close_session`, and `list_open_sessions`.
 
-Prerequisites: Python 3.10+, and an authenticated `argocd` CLI session —
-this project reads its auth token straight out of
-`~/.config/argocd/config`, the same file `argocd login` writes.
+This design allows an agent to call `open_session` once, use the resulting `session_id` to `run` multiple commands in the same environment, and cleanly `close_session` when the task is complete.
 
-```
-git clone https://github.com/arpanjayeshkumarshukla/argocd-exec-mcp.git
-cd argocd-exec-mcp
+**Adding to Claude Code:**
 
-python3 -m venv .venv
-.venv/bin/pip install -e .
-
-# not already logged in? do this first, then re-run the check below
-argocd login <your-argocd-server>
-
-# verify: should list at least one pod for an app you have access to
-.venv/bin/argocd-exec --app <an-app-you-can-see> --list-pods
+```bash
+claude mcp add argocd-exec-mcp -s user -- argocd-exec-mcp-server
 ```
 
-`--server` defaults to whatever `argocd context` is currently pointed at, so
-no server flag is needed if you're already logged into the right one.
-
-Only doing local development (running the test suite, linting)? See
-`CONTRIBUTING.md` for the `.[dev]` extra instead.
-
-Want the binaries on your `PATH` without a venv to think about?
-`pipx install .` from inside the cloned repo works the same way, and is the
-more common way to install a small CLI tool like this one.
-
-## Usage
-
-`--app` is the only thing you must supply — `--pod`/`--container`/
-`--namespace`/`--project` are all derivable from it (ArgoCD's own `context`
-concept is server-level only, unlike `kubectl`'s per-namespace default, so
-this tool resolves the rest itself: the REST `applications/{app}` object for
-`project`, `applications/{app}/manifests` for the first Deployment's first
-container, and the resource tree for pod + namespace). When there's more
-than one pod, the first `Healthy` one is picked and the tool tells you what
-else was available and how to pin one with `--pod`:
-
-```
-# find pods
-argocd-exec --app <app> --list-pods
-
-# one-shot — app alone is enough
-argocd-exec --app <app> -- <command...>
-
-# same, pinned to a specific pod
-argocd-exec --app <app> --pod <pod> -- <command...>
-
-# interactive (real terminal)
-argocd-exec --app <app> --interactive
-```
-
-The remote command's argv is reconstructed with proper shell quoting
-(`shlex.join`), so ordinary invocations don't need any extra quoting layer:
-`argocd-exec --app <app> -- node -e "console.log(1)"` works as your local
-shell already tokenizes it.
-
-**Usage note, not a limitation of this tool**: a compound command (`&&`,
-`;`, pipes) has to be one pre-quoted argument —
-`argocd-exec --app <app> -- 'echo one && echo two'` — because your *local*
-shell, not `argocd-exec`, is what splits unquoted `&&`/`;` before this
-program ever sees them. This is true of any program invoked with trailing
-arguments (`ssh host cmd`, `docker exec container cmd` have the exact same
-requirement); no CLI design choice here could change it.
-
-### MCP server setup
-
-`argocd-exec-mcp-server` is a stdio MCP server. With the Claude Code CLI:
-
-```
-claude mcp add argocd-exec-mcp -s user -- /path/to/venv/bin/argocd-exec-mcp-server
-```
-
-(`-s user` registers it for every project, not just the current one; use
-`-s local` to scope it to one repo instead.) For any other MCP-speaking
-client, the generic config shape is:
+**General MCP Configuration (e.g., for Claude Desktop):**
 
 ```json
 {
   "mcpServers": {
     "argocd-exec-mcp": {
-      "command": "/path/to/venv/bin/argocd-exec-mcp-server"
+      "command": "argocd-exec-mcp-server"
     }
   }
 }
 ```
 
-Restrict it to specific ArgoCD servers with an `env` block —
-`{"ARGOCD_EXEC_ALLOW_SERVERS": "argo.example.com"}` — the same variable
-described below.
+---
 
-### For AI agents
+## Configuration
 
-`open_session` takes the same `app`-alone shortcut as the CLI and returns
-exactly what it resolved (`pod`, `container`, `namespace`, `project`,
-`other_pods`) — read that response before assuming which pod you're talking
-to, especially `other_pods`, since a silent pick among several is a worse
-surprise than a named one. The intended pattern for a multi-command task:
+You can restrict which ArgoCD servers this tool is allowed to communicate with by setting an environment variable:
 
-1. `open_session(app=...)` once — reuse the same `session_id` for every
-   command in the task, don't reopen per command.
-2. `run(session_id, cmd)` as many times as needed. Shell state (cwd,
-   exported env vars) persists across calls, same as a human typing into
-   one terminal.
-3. `close_session(session_id)` when done — an open session outlives the
-   task it was opened for otherwise, and `list_open_sessions` exists so a
-   later turn can find and reuse one instead of leaking a duplicate.
+* **`ARGOCD_EXEC_ALLOW_SERVERS`**: A comma-separated list of allowed hostnames (e.g., `argo.example.com`). If left unset, the tool will trust whichever server your `argocd login` context is currently pointed at.
 
-There's no separate "skill" document for this project by design: the tool
-descriptions above are the whole of the agent-facing documentation, kept in
-one place so they can't drift from what the code actually does.
+---
 
-## Restricting which servers this will touch
+## Project status
 
-`ARGOCD_EXEC_ALLOW_SERVERS` — a comma-separated allow-list of hostnames.
-Unset means "whatever `argocd login` already trusts." This is for pinning a
-deployment to one environment on purpose, not a default restriction.
-
-## What's not here yet, and why
-
-Not a backlog of forgotten work — a record of what was deliberately
-deferred, and the condition under which each item would become worth
-doing, checked directly rather than guessed at where that was possible.
-
-**Blocked on this repo being public, not on effort:**
-
-- **PyPI publishing** (`pip install argocd-exec-mcp`). A private package
-  has no public-PyPI equivalent; going public would need a
-  `publish.yml` + trusted-publisher setup.
-- **CodeQL.** Verified, not assumed: `cookiecutter-pypackage` — the same
-  template this repo's hygiene was diffed against — gates its own CodeQL
-  workflow behind `repository.private == false || GitHub Advanced
-  Security`. Free once public; requires a paid GHAS plan otherwise.
-- **Dependabot auto-merge.** `allow_auto_merge` cannot be enabled on this
-  repo — confirmed by repeatedly calling the GitHub API directly and
-  observing the setting silently stay `false`, not assumed from docs.
-  Free once public or on GitHub Team/Enterprise.
-
-**Deliberately deferred at solo-maintainer scale — revisit if that
-changes:**
-
-- **`CODE_OF_CONDUCT.md`, issue templates, PR template.** GitHub's own
-  Community Standards check
-  (`/repos/{owner}/{repo}/community/profile`) currently scores this repo
-  **71%**; these three are exactly what's missing from 100% — checked live,
-  not estimated.
-- **A docs/ site** (MkDocs/Sphinx) + its own publish workflow + ReadTheDocs
-  — the README covers this project's actual size today.
-- **A `justfile` or release-automation script** — `CONTRIBUTING.md`'s plain
-  commands are enough for a solo maintainer's cadence so far.
-- **Codecov** — needs an external account and a token; `pytest-cov`'s
-  CI-log-only report gets the same visibility with nothing to sign up for
-  (its private-repo terms also weren't confirmed free, unlike everything
-  actually added).
-- **release-drafter / PR auto-labeling** — pay off once PRs come from
-  people other than the maintainer; no signal for that yet.
-- **Poetry as the build backend, or a `src/` layout** — both legitimate
-  alternatives to what's here (plain `pip`+`setuptools`, a flat package
-  dir), but switching now would be a disruptive re-platform for a
-  stylistic difference, not a functional gap.
-
-**Known gaps in what's actually tested:**
-
-- **`cli.py` and `mcp_server.py` sit at 0% direct unit-test coverage** (see
-  CI's `pytest --cov` output) — exercised so far by live testing against a
-  real ArgoCD instance, not by anything in `tests/`. `session.py`'s core
-  logic — the part with the actual protocol complexity — is at 89%.
-- **No live ArgoCD/Kubernetes suite runs in CI** — it can't reach a real
-  cluster. Anything touching `PodSession.connect()` or the protocol-facts
-  list at the top of `session.py` needs manual verification before a
-  release; see `CONTRIBUTING.md`.
+This project is under active development. See `ROADMAP.md` for what's deliberately not here yet and why (what's blocked on this repo going public, what's deferred at its current solo-maintainer scale, and known gaps in test coverage), `CHANGELOG.md` for what's shipped, and `CONTRIBUTING.md` for how to work on it.
