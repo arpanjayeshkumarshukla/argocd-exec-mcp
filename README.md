@@ -201,55 +201,6 @@ Not a backlog of forgotten work — a record of what was deliberately
 deferred, and the condition under which each item would become worth
 doing, checked directly rather than guessed at where that was possible.
 
-**Genuinely inherent — not fixable by any design choice here** (see the
-usage note above for the shell-quoting case):
-
-- **`--interactive` needs a real TTY** (`tty.setraw` on `sys.stdin`) —
-  that's what "raw interactive terminal" means, not a gap. It's been
-  exercised both programmatically (a `pty`-driven test: multiple sequential
-  commands, a `SIGWINCH`, a clean remote `exit`, which caught and fixed a
-  real hang — see CHANGELOG) and **live, by hand, in a real terminal**:
-  arrow-key history navigation, mid-line cursor movement, and a clean
-  `exit` all confirmed working.
-- **Pod auto-resolution picks the first `Healthy` pod** among several —
-  not solvable beyond that, since interchangeable replicas are the point of
-  a Deployment/StatefulSet/DaemonSet; there's no signal that would make one
-  "more correct" to pick than another. Pass `--pod` when you need a
-  specific one, not just any healthy replica.
-
-**Actually fixable, and fixed:**
-
-- Container resolution now covers **Deployment, StatefulSet, and
-  DaemonSet** (previously Deployment-only) by walking the resource tree's
-  own ownership chain — directly for a StatefulSet/DaemonSet-owned pod, one
-  hop further through a ReplicaSet for a Deployment-owned one — rather than
-  assuming which workload a pod belongs to. Reads containers from the
-  *manifests* (declared spec), not the live pod: a live pod can carry
-  containers injected outside the declared spec (e.g. an `istio-proxy`
-  sidecar) that would otherwise be picked ahead of the real workload
-  container — confirmed live, where a pod's actual container order was
-  `[istio-proxy, <app container>]`.
-- **A workload that itself declares more than one container** no longer
-  silently picks the first — `other_containers` in the response says what
-  else was there, the same transparency multiple pods already got.
-- A workload kind this project doesn't recognize (a bare Pod, a Job, or
-  anything not Deployment/StatefulSet/DaemonSet) still can't resolve a
-  container automatically — pass `--container` explicitly for those.
-
-**Not root-cause-confirmed, mitigated anyway:**
-
-- **The echo-boundary detection rarely failed right after a pod restart** —
-  observed once live, immediately after an unrelated deployment rollout,
-  where the very first command against a freshly spawned shell came back
-  with the echoed input still attached. Plausibly a race between the shell
-  echoing at its default terminal width and the `resize` sent in
-  `connect()` landing — a long echoed line is exposed to a wrap boundary in
-  a way a short one isn't. Mitigated by no longer depending on the echo at
-  all: output is now bracketed between two short markers this project
-  controls (see CHANGELOG), rather than by searching for the echo of a
-  potentially long command line. Root cause unconfirmed, since the original
-  failure couldn't be reproduced on demand to verify against directly.
-
 **Blocked on this repo being public, not on effort:**
 
 - **PyPI publishing** (`pip install argocd-exec-mcp`). A private package
