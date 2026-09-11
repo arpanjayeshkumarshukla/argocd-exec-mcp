@@ -111,10 +111,15 @@ argocd-exec --app <app> --interactive
 The remote command's argv is reconstructed with proper shell quoting
 (`shlex.join`), so ordinary invocations don't need any extra quoting layer:
 `argocd-exec --app <app> -- node -e "console.log(1)"` works as your local
-shell already tokenizes it. A compound command (`&&`, `;`, pipes) has to be
-one pre-quoted argument instead, since your *local* shell — not this tool —
-is what splits unquoted `&&`/`;` before this program ever sees them:
-`argocd-exec --app <app> -- 'echo one && echo two'`.
+shell already tokenizes it.
+
+**Usage note, not a limitation of this tool**: a compound command (`&&`,
+`;`, pipes) has to be one pre-quoted argument —
+`argocd-exec --app <app> -- 'echo one && echo two'` — because your *local*
+shell, not `argocd-exec`, is what splits unquoted `&&`/`;` before this
+program ever sees them. This is true of any program invoked with trailing
+arguments (`ssh host cmd`, `docker exec container cmd` have the exact same
+requirement); no CLI design choice here could change it.
 
 ### MCP server setup
 
@@ -171,50 +176,51 @@ deployment to one environment on purpose, not a default restriction.
 
 ## Known limitations
 
-- **Compound shell syntax needs one pre-quoted argument.** `&&`/`;`/pipes
-  between unquoted argv elements are split by your *local* shell before this
-  program runs, not by `argocd-exec` — see the quoting note above.
-- **`--interactive` needs a real TTY** (`tty.setraw` on `sys.stdin`). It's
-  been exercised programmatically against a real pod via a `pty`-driven test
-  (multiple sequential commands, a `SIGWINCH`, and a clean remote `exit`),
-  which caught and fixed a real hang — `select()` on the TLS-wrapped
-  websocket socket doesn't reliably report readability once SSL starts
-  buffering decrypted data internally, so the reader now runs on its own
-  thread with a short recv timeout instead of sharing a `select()` call with
-  the raw stdin fd. What a `pty` test can't stand in for: whether it's
-  actually pleasant to type into from a real terminal emulator — verify that
-  yourself before relying on it day to day.
-- **Pod auto-resolution is a heuristic**: first `Healthy` pod. Where you need
-  a specific pod (not just any healthy replica), pass `--pod` explicitly.
-  Container resolution is *not* a heuristic in the same sense — it walks the
-  resource tree's own `Pod -> ReplicaSet -> Deployment` ownership chain to
-  find the Deployment that actually owns the chosen pod, then takes that
-  Deployment's first declared container (deliberately from the *manifests*,
-  not the live pod: a live pod can carry containers injected outside the
-  declared spec, e.g. an `istio-proxy` sidecar, that would otherwise get
-  picked ahead of the real workload container — confirmed live, where a pod's
-  actual container order was `[istio-proxy, <app container>]`). The one gap
-  in the ownership walk: a Deployment that itself declares more than one
-  container takes the first as declared, which may not be the one you want.
-- **Only Deployment-owned pods resolve a container at all.** A pod backed by
-  a StatefulSet or DaemonSet isn't unsupported by a worse guess — it's
-  unsupported, period: the ownership walk only recognizes
-  `Pod -> ReplicaSet -> Deployment`, and container resolution either falls
-  back to *some* Deployment elsewhere in the app (wrong) or raises (if the
-  app has no Deployment at all). Pass `--container` explicitly for anything
-  not backed by a Deployment.
-- **The echo-boundary detection can rarely fail right after a pod restarts.**
-  Observed once live, immediately after an unrelated deployment rollout: the
-  very first command against a freshly spawned shell came back with the
-  echoed input and the literal `printf` line still attached, instead of just
-  the command's own output — `extract_output()`'s echo search didn't find
-  the marker and fell back to including everything from the start. A second,
-  identical invocation against the same (by-then-settled) pod worked
-  cleanly, and a short command right after the rollout worked cleanly too, so
-  this looks timing-related — plausibly the shell echoing at a default
-  terminal width before the `resize` sent in `connect()` has taken effect —
-  rather than a parsing bug independent of timing. Not reliably reproducible
-  yet, so not fixed: guessing at a fix without being able to reproduce it on
-  demand would mean shipping an untested claim. If you hit this, a retry
-  should clear it; a bug report with exact timing (how soon after a pod
-  became `Healthy`) would help pin it down.
+Genuinely inherent (not fixable by any design choice here — see the usage
+note above for the shell-quoting case):
+
+- **`--interactive` needs a real TTY** (`tty.setraw` on `sys.stdin`) —
+  that's what "raw interactive terminal" means, not a gap. It's been
+  exercised both programmatically (a `pty`-driven test: multiple sequential
+  commands, a `SIGWINCH`, a clean remote `exit`, which caught and fixed a
+  real hang — see CHANGELOG) and **live, by hand, in a real terminal**:
+  arrow-key history navigation, mid-line cursor movement, and a clean
+  `exit` all confirmed working.
+- **Pod auto-resolution picks the first `Healthy` pod** among several —
+  not solvable beyond that, since interchangeable replicas are the point of
+  a Deployment/StatefulSet/DaemonSet; there's no signal that would make one
+  "more correct" to pick than another. Pass `--pod` when you need a
+  specific one, not just any healthy replica.
+
+Actually fixable, and fixed:
+
+- Container resolution now covers **Deployment, StatefulSet, and
+  DaemonSet** (previously Deployment-only) by walking the resource tree's
+  own ownership chain — directly for a StatefulSet/DaemonSet-owned pod, one
+  hop further through a ReplicaSet for a Deployment-owned one — rather than
+  assuming which workload a pod belongs to. Reads containers from the
+  *manifests* (declared spec), not the live pod: a live pod can carry
+  containers injected outside the declared spec (e.g. an `istio-proxy`
+  sidecar) that would otherwise be picked ahead of the real workload
+  container — confirmed live, where a pod's actual container order was
+  `[istio-proxy, <app container>]`.
+- **A workload that itself declares more than one container** no longer
+  silently picks the first — `other_containers` in the response says what
+  else was there, the same transparency multiple pods already got.
+- A workload kind this project doesn't recognize (a bare Pod, a Job, or
+  anything not Deployment/StatefulSet/DaemonSet) still can't resolve a
+  container automatically — pass `--container` explicitly for those.
+
+Not root-cause-confirmed, mitigated anyway:
+
+- **The echo-boundary detection rarely failed right after a pod restart** —
+  observed once live, immediately after an unrelated deployment rollout,
+  where the very first command against a freshly spawned shell came back
+  with the echoed input still attached. Plausibly a race between the shell
+  echoing at its default terminal width and the `resize` sent in
+  `connect()` landing — a long echoed line is exposed to a wrap boundary in
+  a way a short one isn't. Mitigated by no longer depending on the echo at
+  all: output is now bracketed between two short markers this project
+  controls (see CHANGELOG), rather than by searching for the echo of a
+  potentially long command line. Root cause unconfirmed, since the original
+  failure couldn't be reproduced on demand to verify against directly.

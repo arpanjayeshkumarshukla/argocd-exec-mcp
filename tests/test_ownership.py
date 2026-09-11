@@ -1,11 +1,13 @@
-"""Pod -> ReplicaSet -> Deployment ownership resolution.
+"""Pod -> owning workload resolution (Deployment via ReplicaSet, or
+StatefulSet/DaemonSet directly).
 
-This is the fixture-based version of the scenario that couldn't be
-constructed against a live cluster during development: an app with more
-than one Deployment, where "just take the first Deployment found" would
-silently return the wrong container for one of the two pods.
+This is the fixture-based version of scenarios that couldn't be constructed
+against a live cluster during development: an app with more than one
+Deployment (where "just take the first Deployment found" would silently
+return the wrong container for one of the two pods), and StatefulSet/
+DaemonSet ownership (never exercised live at all).
 """
-from argocd_exec_mcp.session import _owning_deployment
+from argocd_exec_mcp.session import _owning_workload
 
 
 def node(kind, name, namespace=None, parent_refs=None):
@@ -34,13 +36,31 @@ def two_deployment_tree():
 
 def test_each_pod_resolves_to_its_own_deployment_not_the_first_one_found():
     tree = two_deployment_tree()
-    assert _owning_deployment(tree, "pod-from-a", "ns") == "dep-a"
-    assert _owning_deployment(tree, "pod-from-b", "ns") == "dep-b"
+    assert _owning_workload(tree, "pod-from-a", "ns") == ("Deployment", "dep-a")
+    assert _owning_workload(tree, "pod-from-b", "ns") == ("Deployment", "dep-b")
+
+
+def test_statefulset_owned_pod_resolves_directly_no_replicaset_hop():
+    tree = {"nodes": [
+        node("StatefulSet", "my-statefulset", "ns"),
+        node("Pod", "my-statefulset-0", "ns",
+             parent_refs=[{"kind": "StatefulSet", "namespace": "ns", "name": "my-statefulset"}]),
+    ]}
+    assert _owning_workload(tree, "my-statefulset-0", "ns") == ("StatefulSet", "my-statefulset")
+
+
+def test_daemonset_owned_pod_resolves_directly_no_replicaset_hop():
+    tree = {"nodes": [
+        node("DaemonSet", "my-daemonset", "ns"),
+        node("Pod", "my-daemonset-abcde", "ns",
+             parent_refs=[{"kind": "DaemonSet", "namespace": "ns", "name": "my-daemonset"}]),
+    ]}
+    assert _owning_workload(tree, "my-daemonset-abcde", "ns") == ("DaemonSet", "my-daemonset")
 
 
 def test_unknown_pod_returns_none():
     tree = two_deployment_tree()
-    assert _owning_deployment(tree, "no-such-pod", "ns") is None
+    assert _owning_workload(tree, "no-such-pod", "ns") is None
 
 
 def test_pod_owned_by_a_bare_replicaset_with_no_deployment_parent_returns_none():
@@ -49,9 +69,9 @@ def test_pod_owned_by_a_bare_replicaset_with_no_deployment_parent_returns_none()
         node("Pod", "orphan-pod", "ns",
              parent_refs=[{"kind": "ReplicaSet", "namespace": "ns", "name": "standalone-rs"}]),
     ]}
-    assert _owning_deployment(tree, "orphan-pod", "ns") is None
+    assert _owning_workload(tree, "orphan-pod", "ns") is None
 
 
 def test_namespace_mismatch_is_not_treated_as_a_match():
     tree = two_deployment_tree()
-    assert _owning_deployment(tree, "pod-from-a", "wrong-namespace") is None
+    assert _owning_workload(tree, "pod-from-a", "wrong-namespace") is None

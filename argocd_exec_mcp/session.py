@@ -36,6 +36,16 @@ module so the protocol facts below are recorded once, not duplicated:
   found by reading the web client's source, not by hitting it live (forcing
   a real token-rotation event on demand isn't practical), so it's covered by
   a scripted unit test, not a live one.
+- Output extraction brackets each command between two markers this project
+  controls (`__START_<nonce>__`, `__DONE_<nonce>_<exit code>__`) rather than
+  by locating the echo of the command line itself. A long compound command
+  echoed back by the terminal is exposed to being split across a line-wrap
+  boundary in a way a short fixed marker mostly isn't — this replaced an
+  earlier design that searched for the echo of the whole line, after an
+  intermittent live failure (right after a pod restart) where that echo
+  search came up empty. Root cause unconfirmed; this reduces exposure to the
+  suspected cause rather than claiming to fix a bug that couldn't be
+  reproduced on demand.
 """
 import json
 import os
@@ -118,19 +128,28 @@ def list_pods(app, server=None):
     ]
 
 
-def _owning_deployment(tree, pod_name, pod_namespace):
-    """Walk Pod -> ReplicaSet -> Deployment via the resource tree's own
-    parentRefs, rather than assuming which Deployment a pod belongs to."""
+_WORKLOAD_KINDS = ('Deployment', 'StatefulSet', 'DaemonSet')
+
+
+def _owning_workload(tree, pod_name, pod_namespace):
+    """Walk the resource tree's own parentRefs from a pod to the workload
+    that owns it, rather than assuming which one it is. A Deployment-owned
+    pod is one hop further removed (through a ReplicaSet) than a
+    StatefulSet- or DaemonSet-owned pod, whose parentRefs point directly at
+    the owning workload. Returns (kind, name) or None."""
     by_key = {(n['kind'], n.get('namespace'), n['name']): n for n in tree.get('nodes', [])}
     pod = by_key.get(('Pod', pod_namespace, pod_name))
     if not pod:
         return None
     for ref in pod.get('parentRefs') or []:
-        rs = by_key.get((ref['kind'], ref['namespace'], ref['name']))
-        if rs and rs['kind'] == 'ReplicaSet':
-            for dref in rs.get('parentRefs') or []:
-                if dref['kind'] == 'Deployment':
-                    return dref['name']
+        if ref['kind'] in ('StatefulSet', 'DaemonSet'):
+            return (ref['kind'], ref['name'])
+        if ref['kind'] == 'ReplicaSet':
+            rs = by_key.get((ref['kind'], ref['namespace'], ref['name']))
+            if rs:
+                for dref in rs.get('parentRefs') or []:
+                    if dref['kind'] == 'Deployment':
+                        return ('Deployment', dref['name'])
     return None
 
 
@@ -148,11 +167,12 @@ def get_project(app, server=None):
 
 
 def get_container_for_pod(app, pod_name, pod_namespace, server=None, tree=None):
-    """The first container of *this specific pod's owning Deployment* — not
-    just "the first Deployment found anywhere in the app's manifests", which
-    silently returns the wrong container for an app with more than one
-    Deployment. Ownership is read from the resource tree's own parentRefs
-    (Pod -> ReplicaSet -> Deployment), not assumed.
+    """The container of *this specific pod's owning workload* (Deployment,
+    StatefulSet, or DaemonSet) — not just "the first Deployment found
+    anywhere in the app's manifests", which silently returns the wrong
+    container for an app with more than one Deployment, and never resolved
+    anything for a StatefulSet/DaemonSet-owned pod at all. Ownership is read
+    from the resource tree's own parentRefs, not assumed.
 
     Deliberately reads containers from the *manifests* (declared spec), not
     the live pod: a live pod can carry containers injected outside the
@@ -160,34 +180,44 @@ def get_container_for_pod(app, pod_name, pod_namespace, server=None, tree=None):
     picked as "first container" ahead of the actual workload container —
     confirmed live against a real cluster, where a sidecar-injected pod's
     actual container order put the injected sidecar first, ahead of the
-    container the Deployment's own spec declared."""
+    container the Deployment's own spec declared.
+
+    Returns (container, other_containers): the first declared container of
+    the owning workload, and the rest, if that workload itself declares more
+    than one — same transparency as `resolve()` gives for multiple pods,
+    since silently picking among several containers is as much a guess as
+    silently picking among several pods.
+    """
     server = server or default_server()
     _check_allowed(server)
     tree = tree if tree is not None else _resource_tree(app, server)
-    deployment_name = _owning_deployment(tree, pod_name, pod_namespace)
+    owner = _owning_workload(tree, pod_name, pod_namespace)
 
     tok = token_for(server)
     url = f"https://{server}/api/v1/applications/{urllib.parse.quote(app)}/manifests"
     req = urllib.request.Request(url, headers={'Authorization': f'Bearer {tok}'})
     data = json.load(urllib.request.urlopen(req, timeout=30, context=SSL_CTX))
-    deployments = []
+    workloads = []  # (kind, name, [container names in declared order])
     for raw in data.get('manifests', []):
         doc = json.loads(raw)
-        if doc.get('kind') == 'Deployment':
+        if doc.get('kind') in _WORKLOAD_KINDS:
             pod_spec = doc.get('spec', {}).get('template', {}).get('spec', {})
-            containers = pod_spec.get('containers', [])
+            containers = [c['name'] for c in pod_spec.get('containers', [])]
             if containers:
-                deployments.append((doc['metadata']['name'], containers[0]['name']))
-    if not deployments:
-        raise RuntimeError(f"no Deployment with a container found in app {app!r}'s manifests")
-    if deployment_name:
-        for name, container in deployments:
-            if name == deployment_name:
-                return container
-    # Couldn't resolve ownership (pod not owned by a ReplicaSet/Deployment,
-    # or the tree didn't have it) — fall back to the old heuristic, but this
+                workloads.append((doc['kind'], doc['metadata']['name'], containers))
+    if not workloads:
+        raise RuntimeError(
+            f"no Deployment/StatefulSet/DaemonSet with a container "
+            f"found in app {app!r}'s manifests")
+    if owner:
+        owner_kind, owner_name = owner
+        for kind, name, containers in workloads:
+            if kind == owner_kind and name == owner_name:
+                return containers[0], containers[1:]
+    # Couldn't resolve ownership (pod not owned by a recognized workload, or
+    # the tree didn't have it) — fall back to the old heuristic, but this
     # path is now the exception, not the default.
-    return deployments[0][1]
+    return workloads[0][2][0], workloads[0][2][1:]
 
 
 def resolve(app, server=None, pod=None):
@@ -216,32 +246,37 @@ def resolve(app, server=None, pod=None):
     else:
         healthy = [p for p in pods if p['health'] == 'Healthy'] or pods
         chosen = healthy[0]
-    container = get_container_for_pod(
+    container, other_containers = get_container_for_pod(
         app, chosen['name'], chosen['namespace'], server, tree=tree)
     return {
         'project': get_project(app, server),
         'namespace': chosen['namespace'],
         'pod': chosen['name'],
         'container': container,
+        'other_containers': other_containers,
         'candidates': [p['name'] for p in pods],
     }
 
 
-def extract_output(raw, marker):
-    """Isolate a command's own output from the TTY's echo and sentinel noise.
+def extract_output(raw, start_marker, end_marker):
+    """Isolate a command's own output between two markers this project
+    controls, rather than by locating the echo of the (potentially long)
+    full command line.
 
-    The terminal echoes the exact bytes sent (unexpanded — literal `%s`, not a
-    digit) before the shell runs anything, marking where real output begins.
-    The *expanded* sentinel (`marker` + digits) marks where it ends.
+    The terminal always echoes the input line, literal text and all, before
+    the shell begins executing any of it — so `start_marker`'s literal text
+    appears twice: once in that echo, once as the real output of the
+    `printf` that emits it. The *first* occurrence is always the echo and
+    the *last* is always the real one, regardless of how long the rest of
+    the compound command is — which matters because the echo of a long
+    line is more exposed to being split across a terminal wrap boundary
+    than a short, fixed marker is. `end_marker` still needs the
+    echo-vs-expanded distinction `%s` vs `\\d+` gives it, since its own
+    value (the exit code) isn't known until the command finishes.
     """
-    echo = marker + '%s__'
-    start = raw.find(echo)
-    if start != -1:
-        nl = raw.find('\n', start)
-        body_start = nl + 1 if nl != -1 else start + len(echo)
-    else:
-        body_start = 0
-    end = re.search(re.escape(marker) + r'\d+__', raw[body_start:])
+    start = raw.rfind(start_marker)
+    body_start = raw.find('\n', start) + 1 if start != -1 else 0
+    end = re.search(re.escape(end_marker) + r'\d+__', raw[body_start:])
     body_end = body_start + end.start() if end else len(raw)
     return raw[body_start:body_end].strip('\n')
 
@@ -318,11 +353,12 @@ class PodSession:
 
     def _run_once(self, cmd, timeout):
         nonce = uuid.uuid4().hex[:8]
-        marker = f"__DONE_{nonce}_"
-        payload = f'{cmd}; printf \'\\n{marker}%s__\\n\' "$?"\n'
+        start_marker = f"__START_{nonce}__"
+        end_marker = f"__DONE_{nonce}_"
+        payload = f'printf \'{start_marker}\\n\'; {cmd}; printf \'\\n{end_marker}%s__\\n\' "$?"\n'
         self.ws.send(json.dumps({"operation": "stdin", "data": payload}))
 
-        done_re = re.compile(re.escape(marker) + r'(\d+)__')
+        done_re = re.compile(re.escape(end_marker) + r'(\d+)__')
         chunks = []
         exit_code = None
         deadline = time.time() + timeout
@@ -354,7 +390,7 @@ class PodSession:
                     break
 
         raw = ANSI.sub('', ''.join(chunks)).replace('\r\n', '\n').replace('\r', '\n')
-        return extract_output(raw, marker), exit_code
+        return extract_output(raw, start_marker, end_marker), exit_code
 
     def close(self):
         if self.ws is not None:

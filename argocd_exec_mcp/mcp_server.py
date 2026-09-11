@@ -34,29 +34,34 @@ def open_session(app: str, pod: str | None = None, container: str | None = None,
                   server: str | None = None, shell: str | None = None) -> dict:
     """Open a persistent shell session in a pod. `app` alone is enough —
     pod/container/namespace/project are auto-resolved (first Healthy pod,
-    first container of the app's first Deployment) when omitted; the
-    response says exactly what was picked and what else was available, so
-    don't skip reading it before assuming which pod you're talking to.
-    Returns {session_id, pod, container, namespace, project, other_pods} —
-    pass session_id to run()/close_session(). The underlying shell and
-    websocket stay open across multiple run() calls — commands share state
-    (cwd, exported env vars) the way they would in one real terminal."""
+    first container of that pod's owning Deployment/StatefulSet/DaemonSet)
+    when omitted; the response says exactly what was picked and what else
+    was available, so don't skip reading it before assuming which pod (or
+    container) you're talking to.
+    Returns {session_id, pod, container, namespace, project, other_pods,
+    other_containers} — pass session_id to run()/close_session(). The
+    underlying shell and websocket stay open across multiple run() calls —
+    commands share state (cwd, exported env vars) the way they would in one
+    real terminal."""
+    other_pods: list[str] = []
+    other_containers: list[str] = []
     if not (pod and container and namespace and project):
         resolved = _resolve(app, server, pod=pod)
         pod = pod or resolved['pod']
-        container = container or resolved['container']
         namespace = namespace or resolved['namespace']
         project = project or resolved['project']
         other_pods = [p for p in resolved['candidates'] if p != pod]
-    else:
-        other_pods = []
+        if not container:
+            container = resolved['container']
+            other_containers = resolved['other_containers']
     session = PodSession(app, pod, container, namespace, project, server, shell)
     session.connect()
     session_id = uuid.uuid4().hex[:12]
     _sessions[session_id] = session
     return {
         "session_id": session_id, "pod": pod, "container": container,
-        "namespace": namespace, "project": project, "other_pods": other_pods,
+        "namespace": namespace, "project": project,
+        "other_pods": other_pods, "other_containers": other_containers,
     }
 
 

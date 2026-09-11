@@ -18,7 +18,7 @@ import websocket
 from argocd_exec_mcp import session as session_module
 from argocd_exec_mcp.session import PodSession
 
-MARKER_RE = re.compile(r'__DONE_[0-9a-f]+_')
+NONCE_RE = re.compile(r'__START_([0-9a-f]+)__')
 TIMEOUT = object()  # sentinel meaning "recv() should raise WebSocketTimeoutException here"
 
 
@@ -58,13 +58,16 @@ class ScriptedWS:
 def scripted_completion(output_text, exit_code=0, stalls_first=0):
     """Build a respond() function: `stalls_first` WebSocketTimeoutExceptions
     before the real output arrives — proving idle time isn't mistaken for
-    completion — then the output followed by the expanded sentinel."""
+    completion — then the start marker, the output, and the expanded end
+    sentinel."""
     def respond(sent_data):
-        marker = MARKER_RE.search(sent_data).group()
+        nonce = NONCE_RE.search(sent_data).group(1)
+        start_marker = f"__START_{nonce}__"
+        end_marker = f"__DONE_{nonce}_"
         frames = [TIMEOUT] * stalls_first
         frames.append(json.dumps({
             "operation": "stdout",
-            "data": f"{output_text}\r\n{marker}{exit_code}__\r\n",
+            "data": f"{start_marker}\r\n{output_text}\r\n{end_marker}{exit_code}__\r\n",
         }))
         return frames
     return respond

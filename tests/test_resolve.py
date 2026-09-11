@@ -20,7 +20,7 @@ def stub_out_network(monkeypatch, tree):
     monkeypatch.setattr(session_module, "get_project", lambda app, server=None: "proj")
     monkeypatch.setattr(
         session_module, "get_container_for_pod",
-        lambda app, pod, ns, server=None, tree=None: "container",
+        lambda app, pod, ns, server=None, tree=None: ("container", []),
     )
 
 
@@ -31,7 +31,21 @@ def test_picks_first_healthy_pod_when_none_specified(monkeypatch):
     assert result["namespace"] == "ns"
     assert result["project"] == "proj"
     assert result["container"] == "container"
+    assert result["other_containers"] == []
     assert set(result["candidates"]) == {"pod-unhealthy", "pod-healthy-1", "pod-healthy-2"}
+
+
+def test_propagates_other_containers_from_get_container_for_pod(monkeypatch):
+    monkeypatch.setattr(session_module, "_resource_tree",
+                         lambda app, server: mixed_health_tree())
+    monkeypatch.setattr(session_module, "get_project", lambda app, server=None: "proj")
+    monkeypatch.setattr(
+        session_module, "get_container_for_pod",
+        lambda app, pod, ns, server=None, tree=None: ("main", ["sidecar-a", "sidecar-b"]),
+    )
+    result = resolve("app", server="fake")
+    assert result["container"] == "main"
+    assert result["other_containers"] == ["sidecar-a", "sidecar-b"]
 
 
 def test_honors_an_explicitly_requested_pod_regardless_of_health(monkeypatch):

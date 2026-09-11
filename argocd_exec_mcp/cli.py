@@ -184,16 +184,20 @@ def main():
         if not namespace:
             namespace = resolved['namespace']
             filled.append(f"namespace={namespace}")
+        container_was_explicit = bool(container)
         if not container:
             container = resolved['container']
             filled.append(f"container={container}")
         if not project:
             project = resolved['project']
             filled.append(f"project={project}")
-        others = [p for p in resolved['candidates'] if p != pod]
+        other_pods = [p for p in resolved['candidates'] if p != pod]
         note = f"[auto-resolved {', '.join(filled)}"
-        if not a.pod and others:
-            note += f" — other pods available: {', '.join(others)} (pass --pod to pick one)"
+        if not a.pod and other_pods:
+            note += f" — other pods available: {', '.join(other_pods)} (pass --pod to pick one)"
+        if not container_was_explicit and resolved['other_containers']:
+            note += (f"; other containers in this pod: "
+                     f"{', '.join(resolved['other_containers'])} (pass --container to pick one)")
         note += "]"
         print(note, file=sys.stderr)
 
