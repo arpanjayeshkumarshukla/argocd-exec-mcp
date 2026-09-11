@@ -1,0 +1,24 @@
+[project]
+name = "argocd-exec-mcp"
+version = "0.1.0"
+description = "Persistent multi-command exec sessions into pods via ArgoCD's terminal API, as a CLI and an MCP server"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "websocket-client>=1.6",
+    "PyYAML>=6.0",
+    "certifi",
+    "mcp>=2.0",
+]
+
+[project.scripts]
+argocd-exec = "argocd_exec_mcp.cli:main"
+argocd-exec-mcp-server = "argocd_exec_mcp.mcp_server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["argocd_exec_mcp*"]
