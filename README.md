@@ -55,14 +55,33 @@ clean output boundary from a TTY-backed shell, ArgoCD or otherwise.
 
 ## Install
 
+Prerequisites: Python 3.10+, and an authenticated `argocd` CLI session —
+this project reads its auth token straight out of
+`~/.config/argocd/config`, the same file `argocd login` writes.
+
 ```
-pip install -e .
+git clone https://github.com/arpanjayeshkumarshukla/argocd-exec-mcp.git
+cd argocd-exec-mcp
+
+python3 -m venv .venv
+.venv/bin/pip install -e .
+
+# not already logged in? do this first, then re-run the check below
+argocd login <your-argocd-server>
+
+# verify: should list at least one pod for an app you have access to
+.venv/bin/argocd-exec --app <an-app-you-can-see> --list-pods
 ```
 
-Requires an authenticated `argocd` CLI session (`argocd login <server>`) —
-this reads its auth token straight out of `~/.config/argocd/config`, same as
-the `argocd` CLI itself. `--server` defaults to whatever `argocd context` is
-currently pointed at.
+`--server` defaults to whatever `argocd context` is currently pointed at, so
+no server flag is needed if you're already logged into the right one.
+
+Only doing local development (running the test suite, linting)? See
+`CONTRIBUTING.md` for the `.[dev]` extra instead.
+
+Want the binaries on your `PATH` without a venv to think about?
+`pipx install .` from inside the cloned repo works the same way, and is the
+more common way to install a small CLI tool like this one.
 
 ## Usage
 
