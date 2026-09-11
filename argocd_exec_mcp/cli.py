@@ -1,22 +1,6 @@
 #!/usr/bin/env python3
 """Run a command in a pod via ArgoCD's terminal WebSocket, one-shot or
-interactive.
-
-  # find pods for an app
-  argocd-exec --app <app> --list-pods
-
-  # run one command, get its output and exit code
-  argocd-exec --app <app> --pod <pod> --container <c> \
-              --namespace <ns> --project <proj> -- <command...>
-
-  # open a real interactive shell (raw terminal, like `kubectl exec -it`)
-  argocd-exec --app <app> --pod <pod> --container <c> \
-              --namespace <ns> --project <proj> --interactive
-
-`--server` defaults to whatever `argocd context` is currently pointed at.
-Set ARGOCD_EXEC_ALLOW_SERVERS to a comma-separated list to restrict this
-tool to specific servers regardless of the active context.
-"""
+interactive. See `argocd-exec --help` for full usage."""
 import argparse
 import json
 import os
@@ -116,7 +100,8 @@ def interactive(app, pod, container, namespace, project, server, shell=None):
                 if not data:
                     break
                 try:
-                    ws.send(json.dumps({"operation": "stdin", "data": data.decode(errors='replace')}))
+                    payload = {"operation": "stdin", "data": data.decode(errors='replace')}
+                    ws.send(json.dumps(payload))
                 except Exception:
                     break
     finally:
@@ -129,20 +114,50 @@ def interactive(app, pod, container, namespace, project, server, shell=None):
 
 
 def main():
-    p = argparse.ArgumentParser()
+    p = argparse.ArgumentParser(
+        prog='argocd-exec',
+        description=(
+            "Run a command in a pod via ArgoCD's terminal WebSocket, one-shot "
+            "or interactive. --app alone is enough — pod/container/namespace/"
+            "project are auto-resolved; pass them explicitly to override."
+        ),
+        epilog=(
+            "examples:\n"
+            "  argocd-exec --app myapp --list-pods\n"
+            "  argocd-exec --app myapp -- echo hello\n"
+            "  argocd-exec --app myapp --pod myapp-abc123 -- echo hello\n"
+            "  argocd-exec --app myapp --interactive\n"
+            "\n"
+            "A compound command (&&, ;, pipes) needs one pre-quoted argument, "
+            "since your local shell splits unquoted operators before this "
+            "program ever sees them:\n"
+            "  argocd-exec --app myapp -- 'echo one && echo two'\n"
+            "\n"
+            "Set ARGOCD_EXEC_ALLOW_SERVERS (comma-separated hostnames) to "
+            "restrict which ArgoCD servers this will ever connect to."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     p.add_argument('--server', default=None,
-                    help="defaults to argocd's current-context")
-    p.add_argument('--app', required=True)
-    p.add_argument('--pod')
-    p.add_argument('--container')
-    p.add_argument('--namespace')
-    p.add_argument('--project')
+                    help="ArgoCD server hostname; defaults to `argocd context`'s current-context")
+    p.add_argument('--app', required=True, help="ArgoCD application name")
+    p.add_argument('--pod', help="specific pod name; auto-resolved (first Healthy pod) if omitted")
+    p.add_argument('--container',
+                    help="specific container name; auto-resolved from the pod's owning "
+                         "Deployment if omitted")
+    p.add_argument('--namespace', help="Kubernetes namespace; auto-resolved if omitted")
+    p.add_argument('--project', help="ArgoCD project name; auto-resolved if omitted")
     p.add_argument('--shell', default=None,
-                    help="omit to let ArgoCD fall back through its own allow-list")
-    p.add_argument('--timeout', type=int, default=20)
-    p.add_argument('--list-pods', action='store_true')
-    p.add_argument('--interactive', action='store_true')
-    p.add_argument('cmd', nargs='*')
+                    help="shell to request (e.g. bash); omit to let ArgoCD fall back "
+                         "through its own allow-list")
+    p.add_argument('--timeout', type=int, default=20,
+                    help="seconds to wait for a one-shot command to complete (default: 20)")
+    p.add_argument('--list-pods', action='store_true',
+                    help="list this app's pods (namespace, name, health) and exit")
+    p.add_argument('--interactive', action='store_true',
+                    help="open a real interactive shell (raw terminal), like `kubectl exec -it`")
+    p.add_argument('cmd', nargs='*',
+                    help="the remote command to run (omit with --list-pods or --interactive)")
     a = p.parse_args()
 
     server = a.server or default_server()

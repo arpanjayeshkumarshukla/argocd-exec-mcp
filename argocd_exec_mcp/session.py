@@ -25,6 +25,17 @@ module so the protocol facts below are recorded once, not duplicated:
   unrecognized or omitted value makes ArgoCD fall back to trying each
   allowed shell in turn rather than failing outright, so PodSession leaves
   it unset by default instead of assuming `sh` exists on every cluster.
+- There's a third message shape beyond `{operation, data, rows, cols}`:
+  `{"Code": 1}` (`TerminalCommand` in websocket.go), sent — preceded by a
+  human-readable `operation: "stdout"` warning line — whenever
+  `sessionManager.VerifyToken()` detects the auth token was rotated
+  server-side. ArgoCD's own web terminal (`pod-terminal-viewer.tsx`) treats
+  it as "close this socket and open a new one"; PodSession does the same via
+  `_ReconnectRequested`, discarding whatever partial output the interrupted
+  attempt collected and reissuing the command on the fresh connection —
+  found by reading the web client's source, not by hitting it live (forcing
+  a real token-rotation event on demand isn't practical), so it's covered by
+  a scripted unit test, not a live one.
 """
 import json
 import os
@@ -147,9 +158,9 @@ def get_container_for_pod(app, pod_name, pod_namespace, server=None, tree=None):
     the live pod: a live pod can carry containers injected outside the
     declared spec (e.g. an `istio-proxy` sidecar) that would otherwise be
     picked as "first container" ahead of the actual workload container —
-    confirmed live: a pod here has containers
-    `['istio-proxy', 'pm-performance-test-chart']` in that order, while the
-    Deployment's own spec only ever declared the second."""
+    confirmed live against a real cluster, where a sidecar-injected pod's
+    actual container order put the injected sidecar first, ahead of the
+    container the Deployment's own spec declared."""
     server = server or default_server()
     _check_allowed(server)
     tree = tree if tree is not None else _resource_tree(app, server)
@@ -163,7 +174,8 @@ def get_container_for_pod(app, pod_name, pod_namespace, server=None, tree=None):
     for raw in data.get('manifests', []):
         doc = json.loads(raw)
         if doc.get('kind') == 'Deployment':
-            containers = doc.get('spec', {}).get('template', {}).get('spec', {}).get('containers', [])
+            pod_spec = doc.get('spec', {}).get('template', {}).get('spec', {})
+            containers = pod_spec.get('containers', [])
             if containers:
                 deployments.append((doc['metadata']['name'], containers[0]['name']))
     if not deployments:
@@ -204,11 +216,13 @@ def resolve(app, server=None, pod=None):
     else:
         healthy = [p for p in pods if p['health'] == 'Healthy'] or pods
         chosen = healthy[0]
+    container = get_container_for_pod(
+        app, chosen['name'], chosen['namespace'], server, tree=tree)
     return {
         'project': get_project(app, server),
         'namespace': chosen['namespace'],
         'pod': chosen['name'],
-        'container': get_container_for_pod(app, chosen['name'], chosen['namespace'], server, tree=tree),
+        'container': container,
         'candidates': [p['name'] for p in pods],
     }
 
@@ -230,6 +244,13 @@ def extract_output(raw, marker):
     end = re.search(re.escape(marker) + r'\d+__', raw[body_start:])
     body_end = body_start + end.start() if end else len(raw)
     return raw[body_start:body_end].strip('\n')
+
+
+class _ReconnectRequested(Exception):
+    """Internal signal: the server sent a `{"Code": ...}` TerminalCommand
+    frame, asking the client to close and reopen the socket (observed cause:
+    an auth token rotation). Never raised past run() — it's caught and
+    turned into a reconnect-and-retry there, the same as a hard drop."""
 
 
 class PodSession:
@@ -278,7 +299,9 @@ class PodSession:
         self.ws.send(json.dumps({"operation": "resize", "cols": 200, "rows": 50}))
 
     def run(self, cmd, timeout=20):
-        """Run one command, reconnecting once if the session has dropped.
+        """Run one command, reconnecting once if the session has dropped —
+        including a server-*requested* reconnect (see _ReconnectRequested),
+        not just a socket-level drop.
 
         Returns (output: str, exit_code: int | None). exit_code is None only
         if the command never completed within `timeout` — a real timeout, not
@@ -288,7 +311,8 @@ class PodSession:
             self.connect()
         try:
             return self._run_once(cmd, timeout)
-        except (websocket.WebSocketConnectionClosedException, ConnectionError, OSError):
+        except (websocket.WebSocketConnectionClosedException, ConnectionError,
+                OSError, _ReconnectRequested):
             self.connect()
             return self._run_once(cmd, timeout)
 
@@ -313,6 +337,15 @@ class PodSession:
                 d = json.loads(m)
             except (ValueError, TypeError):
                 continue
+            # ArgoCD's own web terminal treats this as "close and reopen the
+            # socket": server/application/websocket.go sends
+            # TerminalCommand{Code: 1} (preceded by a human-readable stdout
+            # warning) when it detects the auth token was rotated
+            # server-side. Whatever partial output this attempt collected is
+            # discarded — run() reconnects and reissues the whole command,
+            # the same as it does for a hard socket drop.
+            if d.get("Code") is not None:
+                raise _ReconnectRequested(d.get("Code"))
             if d.get("operation") == "stdout":
                 chunks.append(d.get("data", ""))
                 match = done_re.search(ANSI.sub('', ''.join(chunks)))

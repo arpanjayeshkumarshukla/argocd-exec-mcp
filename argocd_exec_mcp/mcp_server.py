@@ -14,7 +14,9 @@ import uuid
 
 from mcp.server.mcpserver import MCPServer
 
-from .session import PodSession, list_pods as _list_pods, resolve as _resolve
+from .session import PodSession
+from .session import list_pods as _list_pods
+from .session import resolve as _resolve
 
 mcp = MCPServer("argocd-exec-mcp")
 _sessions: dict[str, PodSession] = {}

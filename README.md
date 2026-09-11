@@ -97,9 +97,52 @@ one pre-quoted argument instead, since your *local* shell — not this tool —
 is what splits unquoted `&&`/`;` before this program ever sees them:
 `argocd-exec --app <app> -- 'echo one && echo two'`.
 
-For the MCP server, point your MCP client config at
-`argocd-exec-mcp-server` (stdio transport). Its `open_session` tool takes
-the same `app`-alone shortcut and returns what it resolved.
+### MCP server setup
+
+`argocd-exec-mcp-server` is a stdio MCP server. With the Claude Code CLI:
+
+```
+claude mcp add argocd-exec-mcp -s user -- /path/to/venv/bin/argocd-exec-mcp-server
+```
+
+(`-s user` registers it for every project, not just the current one; use
+`-s local` to scope it to one repo instead.) For any other MCP-speaking
+client, the generic config shape is:
+
+```json
+{
+  "mcpServers": {
+    "argocd-exec-mcp": {
+      "command": "/path/to/venv/bin/argocd-exec-mcp-server"
+    }
+  }
+}
+```
+
+Restrict it to specific ArgoCD servers with an `env` block —
+`{"ARGOCD_EXEC_ALLOW_SERVERS": "argo.example.com"}` — the same variable
+described below.
+
+### For AI agents
+
+`open_session` takes the same `app`-alone shortcut as the CLI and returns
+exactly what it resolved (`pod`, `container`, `namespace`, `project`,
+`other_pods`) — read that response before assuming which pod you're talking
+to, especially `other_pods`, since a silent pick among several is a worse
+surprise than a named one. The intended pattern for a multi-command task:
+
+1. `open_session(app=...)` once — reuse the same `session_id` for every
+   command in the task, don't reopen per command.
+2. `run(session_id, cmd)` as many times as needed. Shell state (cwd,
+   exported env vars) persists across calls, same as a human typing into
+   one terminal.
+3. `close_session(session_id)` when done — an open session outlives the
+   task it was opened for otherwise, and `list_open_sessions` exists so a
+   later turn can find and reuse one instead of leaking a duplicate.
+
+There's no separate "skill" document for this project by design: the tool
+descriptions above are the whole of the agent-facing documentation, kept in
+one place so they can't drift from what the code actually does.
 
 ## Restricting which servers this will touch
 
@@ -141,3 +184,18 @@ deployment to one environment on purpose, not a default restriction.
   back to *some* Deployment elsewhere in the app (wrong) or raises (if the
   app has no Deployment at all). Pass `--container` explicitly for anything
   not backed by a Deployment.
+- **The echo-boundary detection can rarely fail right after a pod restarts.**
+  Observed once live, immediately after an unrelated deployment rollout: the
+  very first command against a freshly spawned shell came back with the
+  echoed input and the literal `printf` line still attached, instead of just
+  the command's own output — `extract_output()`'s echo search didn't find
+  the marker and fell back to including everything from the start. A second,
+  identical invocation against the same (by-then-settled) pod worked
+  cleanly, and a short command right after the rollout worked cleanly too, so
+  this looks timing-related — plausibly the shell echoing at a default
+  terminal width before the `resize` sent in `connect()` has taken effect —
+  rather than a parsing bug independent of timing. Not reliably reproducible
+  yet, so not fixed: guessing at a fix without being able to reproduce it on
+  demand would mean shipping an untested claim. If you hit this, a retry
+  should clear it; a bug report with exact timing (how soon after a pod
+  became `Healthy`) would help pin it down.
