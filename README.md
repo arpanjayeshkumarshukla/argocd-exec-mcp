@@ -72,6 +72,24 @@ The `--app` flag is the only required argument. The tool automatically talks to 
 
 > **Note on compound commands:** If you are chaining commands together with `&&`, `;`, or pipes `|`, you must quote the entire command string (e.g., `argocd-exec --app <app> -- 'echo one && echo two'`). Otherwise, your local shell will evaluate the operators before passing the command to ArgoCD.
 
+### Full flag reference
+
+The examples above cover the common cases. `argocd-exec --help` is the source of truth; the full set of flags is:
+
+| Flag | Purpose |
+| --- | --- |
+| `--app` | ArgoCD application name (required) |
+| `--server` | ArgoCD server hostname; defaults to `argocd context`'s current-context |
+| `--pod` | specific pod name; auto-resolved (first `Healthy` pod) if omitted |
+| `--container` | specific container name; auto-resolved from the pod's owning Deployment/StatefulSet/DaemonSet if omitted |
+| `--namespace` | Kubernetes namespace; auto-resolved if omitted |
+| `--project` | ArgoCD project name; auto-resolved if omitted |
+| `--shell` | shell to request (e.g. `bash`); omit to let ArgoCD fall back through its own allow-list |
+| `--timeout` | seconds to wait for a one-shot command to complete (default: 20) |
+| `--list-pods` | list this app's pods (namespace, name, health) and exit |
+| `--check` | verify prerequisites (`execEnabled`, RBAC) for `--app` and exit; exits non-zero on any failed check |
+| `--interactive` | open a real interactive shell (raw terminal), like `kubectl exec -it` |
+
 ---
 
 ## Using with AI Agents (MCP)
@@ -105,6 +123,8 @@ claude mcp add argocd-exec-mcp -s user -- argocd-exec-mcp-server
 You can restrict which ArgoCD servers this tool is allowed to communicate with by setting an environment variable:
 
 * **`ARGOCD_EXEC_ALLOW_SERVERS`**: A comma-separated list of allowed hostnames (e.g., `argo.example.com`). If left unset, the tool will trust whichever server your `argocd login` context is currently pointed at.
+
+If you're logged into more than one ArgoCD server, run `argocd context` to see which one is current (marked with `*`) and switch with `argocd context <server>`. This tool defaults to that same current-context, so it's worth checking if you have several `argocd login` sessions and haven't passed `--server` explicitly.
 
 ---
 
