@@ -133,6 +133,7 @@ def main():
         epilog=(
             "examples:\n"
             "  argocd-exec --app myapp --list-pods\n"
+            "  argocd-exec --app myapp --events\n"
             "  argocd-exec --app myapp -- echo hello\n"
             "  argocd-exec --app myapp --pod myapp-abc123 -- echo hello\n"
             "  argocd-exec --app myapp --interactive\n"

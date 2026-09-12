@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here. The format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Kubernetes Events**: `argocd-exec --events` and the `list_events` MCP tool surface Kubernetes events (`FailedScheduling`, `ImagePullBackOff`, `OOMKilled`, and the like) across an ArgoCD app's resources — the same data ArgoCD's own web UI Events tab shows. Defaults to Warning-type events; `--include-normal` / `include_normal=True` also includes routine events.
+
+### Fixed
+
+- **`resolve()` allow-list gate**: `resolve()` now checks `ARGOCD_EXEC_ALLOW_SERVERS` before its first network call, matching every other function in `session.py`. Previously it could send a request to a disallowed server before anything rejected it.
+
 ## [0.1.0] — 2026-09-11
 
 Initial release.
