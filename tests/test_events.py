@@ -1,18 +1,9 @@
-import json
-
 import pytest
 
 from argocd_exec_mcp import session as session_module
 from argocd_exec_mcp.session import list_events
 
-
-class FakeResponse:
-    def __init__(self, payload):
-        self._payload = json.dumps(payload).encode()
-
-    def read(self):
-        return self._payload
-
+from .conftest import FakeResponse
 
 WARNING_EVENT = {
     "type": "Warning", "reason": "FailedScheduling", "message": "0/3 nodes available",
@@ -26,41 +17,41 @@ NORMAL_EVENT = {
 }
 
 
-def stub_urlopen(monkeypatch, items):
+def stub_urlopen(monkeypatch, payload):
     monkeypatch.setattr(session_module, "token_for", lambda server: "tok")
 
     def fake_urlopen(req, timeout=30, context=None):
-        return FakeResponse({"items": items})
+        return FakeResponse(payload)
 
     monkeypatch.setattr(session_module.urllib.request, "urlopen", fake_urlopen)
 
 
 def test_defaults_to_warning_type_only(monkeypatch):
-    stub_urlopen(monkeypatch, [WARNING_EVENT, NORMAL_EVENT])
+    stub_urlopen(monkeypatch, {"items": [WARNING_EVENT, NORMAL_EVENT]})
     events = list_events("app", server="fake")
     assert len(events) == 1
-    assert events[0]["type"] == "Warning"
-    assert events[0]["reason"] == "FailedScheduling"
+    # full projected shape, not just type/reason -- catches a scrambled field
+    # in _project_event (e.g. the wrong source key for message or count)
+    assert events[0] == {
+        "type": "Warning", "reason": "FailedScheduling", "message": "0/3 nodes available",
+        "involvedObject": {"kind": "Pod", "name": "my-pod"}, "count": 5,
+        "firstTimestamp": None, "lastTimestamp": "2026-09-12T10:00:00Z",
+    }
 
 
 def test_include_normal_returns_both_types(monkeypatch):
-    stub_urlopen(monkeypatch, [WARNING_EVENT, NORMAL_EVENT])
+    stub_urlopen(monkeypatch, {"items": [WARNING_EVENT, NORMAL_EVENT]})
     events = list_events("app", server="fake", include_normal=True)
     assert {e["type"] for e in events} == {"Warning", "Normal"}
 
 
 def test_no_events_returns_empty_list_not_an_error(monkeypatch):
-    stub_urlopen(monkeypatch, [])
+    stub_urlopen(monkeypatch, {"items": []})
     assert list_events("app", server="fake") == []
 
 
 def test_missing_items_key_returns_empty_list(monkeypatch):
-    monkeypatch.setattr(session_module, "token_for", lambda server: "tok")
-
-    def fake_urlopen(req, timeout=30, context=None):
-        return FakeResponse({})
-
-    monkeypatch.setattr(session_module.urllib.request, "urlopen", fake_urlopen)
+    stub_urlopen(monkeypatch, {})
     assert list_events("app", server="fake") == []
 
 

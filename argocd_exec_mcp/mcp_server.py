@@ -36,19 +36,36 @@ def list_events(app: str, server: str | None = None, include_normal: bool = Fals
     """Kubernetes events across an ArgoCD app's resources. Defaults to
     Warning-type only (FailedScheduling, BackOff, Unhealthy); include_normal=True
     also returns routine events. Capped at the 50 most recent events (by
-    lastTimestamp) — the response's own `filter` and `truncated` fields state
-    what was actually applied to this call, so an empty or short `events` list
-    isn't misread as "nothing happened". Events are short-lived (roughly one
-    hour, cluster-default TTL): an empty result means nothing is within the
-    current retention window, not that nothing happened.
-    Returns {filter, count, truncated, events}."""
+    lastTimestamp), Warning events prioritized over Normal ones so an
+    --include-normal call can't bump the debugging-relevant events out of the
+    cap — the response's own `filter` and `truncated` fields state what was
+    actually applied to this call, so an empty or short `events` list isn't
+    misread as "nothing happened". Events are short-lived (roughly one hour,
+    cluster-default TTL): an empty result means nothing is within the current
+    retention window, not that nothing happened.
+
+    The CLI's `--events` prints this same underlying data unsorted and
+    uncapped; this tool's sort/cap is deliberately agent-specific, to bound
+    what lands in an agent's context.
+    Returns {filter, returned_count, truncated, events}."""
     events = _list_events(app, server=server, include_normal=include_normal)
-    events = sorted(events, key=lambda e: e.get('lastTimestamp', ''), reverse=True)
+    # `or ''`, not `.get(key, '')`: a Series-aggregated Warning event (the exact
+    # kind this tool targets) can have lastTimestamp present but JSON null --
+    # Kubernetes' zero-valued metav1.Time serializes that way -- and dict.get's
+    # default only covers a missing key, not a present-but-None value.
+    #
+    # Two stable sorts, most-significant key last: recency first, then
+    # Warning-before-Normal. list.sort() is stable, so the second sort
+    # preserves each type's recency order -- Warning events always sort
+    # before Normal ones, so include_normal=True can't let a flood of
+    # routine Normal events push Warnings out of the cap below.
+    events = sorted(events, key=lambda e: e.get('lastTimestamp') or '', reverse=True)
+    events.sort(key=lambda e: e.get('type') == 'Normal')
     truncated = len(events) > _EVENTS_CAP
     events = events[:_EVENTS_CAP]
     return {
         "filter": "Warning,Normal" if include_normal else "Warning",
-        "count": len(events),
+        "returned_count": len(events),
         "truncated": truncated,
         "events": events,
     }

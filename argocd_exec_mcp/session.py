@@ -141,6 +141,19 @@ def list_pods(app, server=None):
     ]
 
 
+def _project_event(e):
+    involved = e.get('involvedObject') or {}
+    return {
+        'type': e.get('type'),
+        'reason': e.get('reason'),
+        'message': e.get('message'),
+        'involvedObject': {'kind': involved.get('kind'), 'name': involved.get('name')},
+        'count': e.get('count'),
+        'firstTimestamp': e.get('firstTimestamp'),
+        'lastTimestamp': e.get('lastTimestamp'),
+    }
+
+
 def list_events(app, server=None, include_normal=False):
     """Kubernetes Events across all of `app`'s resources — the same data
     ArgoCD's own web UI Events tab shows via this endpoint. Defaults to
@@ -148,16 +161,22 @@ def list_events(app, server=None, include_normal=False):
     BackOff, Unhealthy); pass `include_normal=True` to also get routine
     events. Events are short-lived (roughly one hour, cluster-default TTL):
     an empty result means nothing is within the current retention window,
-    not that nothing happened."""
+    not that nothing happened.
+
+    Each event is projected down to the fields a caller actually needs
+    (type/reason/message/involvedObject.kind+name/count/first+lastTimestamp)
+    rather than returned as ArgoCD's raw Kubernetes Event object, which also
+    carries metadata, source, and reporting fields nothing here reads."""
     server = server or default_server()
     _check_allowed(server)
     tok = token_for(server)
-    url = f"https://{server}/api/v1/applications/{urllib.parse.quote(app)}/events?appNamespace=argocd"
+    url = (f"https://{server}/api/v1/applications/{urllib.parse.quote(app)}"
+           f"/events?appNamespace=argocd")
     data = _get_json(url, tok, 30)
     items = data.get('items') or []
-    if include_normal:
-        return items
-    return [e for e in items if e.get('type') == 'Warning']
+    if not include_normal:
+        items = [e for e in items if e.get('type') == 'Warning']
+    return [_project_event(e) for e in items]
 
 
 _WORKLOAD_KINDS = ('Deployment', 'StatefulSet', 'DaemonSet')

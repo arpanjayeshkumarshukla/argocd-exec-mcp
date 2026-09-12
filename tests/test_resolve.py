@@ -83,10 +83,5 @@ def test_disallowed_server_raises_before_any_network_call(monkeypatch):
         raise AssertionError("should not reach _resource_tree")
 
     monkeypatch.setattr(session_module, "_resource_tree", fail_if_called)
-    monkeypatch.setattr(session_module, "get_project", lambda app, server=None: "proj")
-    monkeypatch.setattr(
-        session_module, "get_container_for_pod",
-        lambda app, pod, ns, server=None, tree=None: ("container", []),
-    )
     with pytest.raises(ValueError, match="not in ARGOCD_EXEC_ALLOW_SERVERS"):
         resolve("app", server="not-allowed.example.com")

@@ -19,6 +19,7 @@ import certifi
 import websocket
 
 from .session import (
+    ANSI,
     PodSession,
     allowed_servers,
     check_prerequisites,
@@ -197,10 +198,15 @@ def main():
         return
 
     if a.events:
+        # Event fields (especially `message`) come from workload-controlled
+        # data (e.g. probe output) and reach a real terminal here, unlike the
+        # already-ANSI-stripped PTY output in interactive()/PodSession.run() --
+        # strip escape sequences the same way before printing.
         for event in list_events(a.app, server, include_normal=a.include_normal):
             involved = event.get('involvedObject', {})
-            print(event.get('type'), event.get('reason'),
-                  f"{involved.get('kind')}/{involved.get('name')}", event.get('message'))
+            fields = (str(event.get('type')), str(event.get('reason')),
+                      f"{involved.get('kind')}/{involved.get('name')}", str(event.get('message')))
+            print(*(ANSI.sub('', f) for f in fields))
         return
 
     pod, container, namespace, project = a.pod, a.container, a.namespace, a.project

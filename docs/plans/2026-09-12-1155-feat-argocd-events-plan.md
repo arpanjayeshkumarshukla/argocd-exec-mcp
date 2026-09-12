@@ -101,7 +101,7 @@ Add a read-only surface — `--events` on the CLI and a matching `list_events` M
 - KTD4. `resolve()` fix: insert `_check_allowed(server)` immediately after `server = server or default_server()`, before its `_resource_tree` call — the narrowest possible fix, not a broader gating refactor (see Scope Boundaries). Governs R8.
 - KTD5. CLI flag `--include-normal`; MCP parameter `include_normal: bool = False` — the same base name on both surfaces, matching the CLI/MCP name-parity precedent `open_session` already sets. Governs R2.
 - KTD6. `--events` is wired as an early-return branch in `cli.py`'s `main()`, in the same position as `--check`/`--list-pods` (before the `resolve()` auto-fill block) — first-matching-flag-wins, the same precedence those two already have with each other. Governs R3.
-- KTD7. The MCP `list_events` tool returns a small dict — `{"filter": "Warning"|"Warning,Normal", "count": N, "truncated": bool, "events": [...]}` — capped to the 50 most recent events by `lastTimestamp`. The `filter` and `truncated` fields carry per-call what a static docstring alone could not: what was actually filtered and whether anything was cut, for that specific response. The CLI path prints the raw event list, uncapped. Governs R5, R6.
+- KTD7. The MCP `list_events` tool returns a small dict — `{"filter": "Warning"|"Warning,Normal", "returned_count": N, "truncated": bool, "events": [...]}` — capped to the 50 most recent events by `lastTimestamp`, Warning events sorted ahead of Normal ones so the cap can't be dominated by routine events. The `filter` and `truncated` fields carry per-call what a static docstring alone could not: what was actually filtered and whether anything was cut, for that specific response. The CLI path prints the raw event list, unsorted and uncapped — a deliberate divergence (agent context needs a bound, a terminal print doesn't), stated in both functions' docstrings. Governs R5, R6.
 
 ### Assumptions
 
@@ -194,8 +194,8 @@ Add a read-only surface — `--events` on the CLI and a matching `list_events` M
 
 **Approach:**
 1. Import `list_events` from `session.py`, aliased the same way `list_pods` already is.
-2. Add `@mcp.tool() def list_events(app, server=None, include_normal=False) -> dict`, calling the shared function, sorting by `lastTimestamp`, and slicing to the 50 most recent.
-3. Return `{"filter": "Warning,Normal" if include_normal else "Warning", "count": <len after cap>, "truncated": <True if more than 50 existed before slicing>, "events": [...]}`.
+2. Add `@mcp.tool() def list_events(app, server=None, include_normal=False) -> dict`, calling the shared function, sorting by `lastTimestamp` (Warning events stably sorted ahead of Normal ones so `include_normal=True` can't crowd Warnings out of the cap), and slicing to the 50 most recent.
+3. Return `{"filter": "Warning,Normal" if include_normal else "Warning", "returned_count": <len after cap>, "truncated": <True if more than 50 existed before slicing>, "events": [...]}`. Named `returned_count`, not `count`, so it can't be confused with each event's own `count` field (the Kubernetes occurrence counter) — a code-review finding on the first cut of this unit.
 4. State in the docstring that the default is Warning-only and that the response's own `filter`/`truncated` fields (not just this docstring) describe what applied to a given call.
 
 **Patterns to follow:** `mcp_server.py:25-28` (`list_pods`'s tool shape) for the thin-wrapper style. No existing tool in this repo returns a wrapper dict instead of a bare list; this is a deliberate, minimal deviation, justified by R5's per-call-legibility requirement.
