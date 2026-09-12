@@ -63,6 +63,9 @@ The `--app` flag is the only required argument. The tool automatically talks to 
 
 * **List available pods:**
   `argocd-exec --app <app> --list-pods`
+* **List Warning-type Kubernetes events for this app** (`FailedScheduling`, `ImagePullBackOff`, `OOMKilled`, and the like — the same data ArgoCD's own web UI Events tab shows):
+  `argocd-exec --app <app> --events`
+  Pass `--include-normal` to also see routine (Normal-type) events.
 * **Run a single one-shot command:**
   `argocd-exec --app <app> -- <command...>`
 * **Run a command on a specific pod:**
@@ -87,6 +90,8 @@ The examples above cover the common cases. `argocd-exec --help` is the source of
 | `--shell` | shell to request (e.g. `bash`); omit to let ArgoCD fall back through its own allow-list |
 | `--timeout` | seconds to wait for a one-shot command to complete (default: 20) |
 | `--list-pods` | list this app's pods (namespace, name, health) and exit |
+| `--events` | list Warning-type Kubernetes events across this app's resources and exit |
+| `--include-normal` | with `--events`, also include Normal-type events (default: Warning-type only) |
 | `--check` | verify prerequisites (`execEnabled`, RBAC) for `--app` and exit; exits non-zero on any failed check |
 | `--interactive` | open a real interactive shell (raw terminal), like `kubectl exec -it` |
 
@@ -94,7 +99,7 @@ The examples above cover the common cases. `argocd-exec --help` is the source of
 
 ## Using with AI Agents (MCP)
 
-The `argocd-exec-mcp-server` exposes ArgoCD terminal access to AI agents via four standard tools: `open_session`, `run`, `close_session`, and `list_open_sessions`.
+The `argocd-exec-mcp-server` exposes ArgoCD terminal access to AI agents via six standard tools: `list_pods`, `list_events`, `open_session`, `run`, `close_session`, and `list_open_sessions`.
 
 This design allows an agent to call `open_session` once, use the resulting `session_id` to `run` multiple commands in the same environment, and cleanly `close_session` when the task is complete.
 
