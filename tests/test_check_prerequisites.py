@@ -1,19 +1,12 @@
 """check_prerequisites(): the automated version of "is ExecEnabled on and
 does my token have the right RBAC", instead of only finding out via an
 opaque failure partway through a real exec attempt."""
-import json
 import subprocess
 
 from argocd_exec_mcp import session as session_module
 from argocd_exec_mcp.session import check_prerequisites
 
-
-class FakeResponse:
-    def __init__(self, payload):
-        self._payload = json.dumps(payload).encode()
-
-    def read(self):
-        return self._payload
+from .conftest import FakeResponse
 
 
 def fake_can_i_result(value):

@@ -74,3 +74,14 @@ def test_falls_back_to_any_pod_when_none_are_healthy(monkeypatch):
     stub_out_network(monkeypatch, tree)
     result = resolve("app", server="fake")
     assert result["pod"] == "pod-degraded"
+
+
+def test_disallowed_server_raises_before_any_network_call(monkeypatch):
+    monkeypatch.setenv("ARGOCD_EXEC_ALLOW_SERVERS", "allowed.example.com")
+
+    def fail_if_called(app, server):
+        raise AssertionError("should not reach _resource_tree")
+
+    monkeypatch.setattr(session_module, "_resource_tree", fail_if_called)
+    with pytest.raises(ValueError, match="not in ARGOCD_EXEC_ALLOW_SERVERS"):
+        resolve("app", server="not-allowed.example.com")

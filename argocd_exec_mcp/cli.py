@@ -19,10 +19,12 @@ import certifi
 import websocket
 
 from .session import (
+    ANSI,
     PodSession,
     allowed_servers,
     check_prerequisites,
     default_server,
+    list_events,
     list_pods,
     resolve,
     token_for,
@@ -132,6 +134,7 @@ def main():
         epilog=(
             "examples:\n"
             "  argocd-exec --app myapp --list-pods\n"
+            "  argocd-exec --app myapp --events\n"
             "  argocd-exec --app myapp -- echo hello\n"
             "  argocd-exec --app myapp --pod myapp-abc123 -- echo hello\n"
             "  argocd-exec --app myapp --interactive\n"
@@ -162,14 +165,20 @@ def main():
                     help="seconds to wait for a one-shot command to complete (default: 20)")
     p.add_argument('--list-pods', action='store_true',
                     help="list this app's pods (namespace, name, health) and exit")
+    p.add_argument('--events', action='store_true',
+                    help="list Warning-type Kubernetes events across this app's resources "
+                         "and exit; pass --include-normal to also see routine events")
+    p.add_argument('--include-normal', action='store_true',
+                    help="with --events, also include Normal-type events (default: "
+                         "Warning-type only)")
     p.add_argument('--check', action='store_true',
                     help="verify prerequisites (ExecEnabled, RBAC) for --app and exit; "
                          "exits non-zero on any failed check")
     p.add_argument('--interactive', action='store_true',
                     help="open a real interactive shell (raw terminal), like `kubectl exec -it`")
     p.add_argument('cmd', nargs='*',
-                    help="the remote command to run (omit with --list-pods, --check, "
-                         "or --interactive)")
+                    help="the remote command to run (omit with --list-pods, --events, "
+                         "--check, or --interactive)")
     a = p.parse_args()
 
     server = a.server or default_server()
@@ -186,6 +195,18 @@ def main():
     if a.list_pods:
         for pod in list_pods(a.app, server):
             print(pod['namespace'], pod['name'], pod['health'])
+        return
+
+    if a.events:
+        # Event fields (especially `message`) come from workload-controlled
+        # data (e.g. probe output) and reach a real terminal here, unlike the
+        # already-ANSI-stripped PTY output in interactive()/PodSession.run() --
+        # strip escape sequences the same way before printing.
+        for event in list_events(a.app, server, include_normal=a.include_normal):
+            involved = event.get('involvedObject', {})
+            fields = (str(event.get('type')), str(event.get('reason')),
+                      f"{involved.get('kind')}/{involved.get('name')}", str(event.get('message')))
+            print(*(ANSI.sub('', f) for f in fields))
         return
 
     pod, container, namespace, project = a.pod, a.container, a.namespace, a.project
