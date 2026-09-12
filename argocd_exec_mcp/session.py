@@ -310,6 +310,7 @@ def resolve(app, server=None, pod=None):
     container is resolved from *this specific pod's* owning Deployment, not
     just any Deployment in the app — see get_container_for_pod()."""
     server = server or default_server()
+    _check_allowed(server)
     tree = _resource_tree(app, server)
     pods = [
         {'namespace': n['namespace'], 'name': n['name'],
