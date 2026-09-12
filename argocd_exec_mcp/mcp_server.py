@@ -15,8 +15,11 @@ import uuid
 from mcp.server.mcpserver import MCPServer
 
 from .session import PodSession
+from .session import list_events as _list_events
 from .session import list_pods as _list_pods
 from .session import resolve as _resolve
+
+_EVENTS_CAP = 50
 
 mcp = MCPServer("argocd-exec-mcp")
 _sessions: dict[str, PodSession] = {}
@@ -26,6 +29,29 @@ _sessions: dict[str, PodSession] = {}
 def list_pods(app: str, server: str | None = None) -> list[dict]:
     """List pods for an ArgoCD app, with namespace and health."""
     return _list_pods(app, server)
+
+
+@mcp.tool()
+def list_events(app: str, server: str | None = None, include_normal: bool = False) -> dict:
+    """Kubernetes events across an ArgoCD app's resources. Defaults to
+    Warning-type only (FailedScheduling, BackOff, Unhealthy); include_normal=True
+    also returns routine events. Capped at the 50 most recent events (by
+    lastTimestamp) — the response's own `filter` and `truncated` fields state
+    what was actually applied to this call, so an empty or short `events` list
+    isn't misread as "nothing happened". Events are short-lived (roughly one
+    hour, cluster-default TTL): an empty result means nothing is within the
+    current retention window, not that nothing happened.
+    Returns {filter, count, truncated, events}."""
+    events = _list_events(app, server=server, include_normal=include_normal)
+    events = sorted(events, key=lambda e: e.get('lastTimestamp', ''), reverse=True)
+    truncated = len(events) > _EVENTS_CAP
+    events = events[:_EVENTS_CAP]
+    return {
+        "filter": "Warning,Normal" if include_normal else "Warning",
+        "count": len(events),
+        "truncated": truncated,
+        "events": events,
+    }
 
 
 @mcp.tool()
