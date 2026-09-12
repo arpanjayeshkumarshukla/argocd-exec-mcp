@@ -141,6 +141,25 @@ def list_pods(app, server=None):
     ]
 
 
+def list_events(app, server=None, include_normal=False):
+    """Kubernetes Events across all of `app`'s resources — the same data
+    ArgoCD's own web UI Events tab shows via this endpoint. Defaults to
+    Warning-type events only (the debugging-relevant kind: FailedScheduling,
+    BackOff, Unhealthy); pass `include_normal=True` to also get routine
+    events. Events are short-lived (roughly one hour, cluster-default TTL):
+    an empty result means nothing is within the current retention window,
+    not that nothing happened."""
+    server = server or default_server()
+    _check_allowed(server)
+    tok = token_for(server)
+    url = f"https://{server}/api/v1/applications/{urllib.parse.quote(app)}/events?appNamespace=argocd"
+    data = _get_json(url, tok, 30)
+    items = data.get('items') or []
+    if include_normal:
+        return items
+    return [e for e in items if e.get('type') == 'Warning']
+
+
 _WORKLOAD_KINDS = ('Deployment', 'StatefulSet', 'DaemonSet')
 
 
